@@ -1,0 +1,1 @@
+{"42": {"Name": "Tenant_A", "Allowed_VNIs": [43], "Deployed_TDC_Names": [], "mainIngressNames": []}, "43": {"Name": "Tenant_B", "Allowed_VNIs": [42], "Deployed_TDC_Names": [], "mainIngressNames": []}}

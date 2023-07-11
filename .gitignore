@@ -1,0 +1,29 @@
+.venv
+__pycache__
+logs
+*.pyc
+*.pyi
+p4/**/*.pyo
+data
+inc_template/p4build/**
+inc_template/*.txt
+**/build
+inc_template/tofino/tenant_inc
+inc_template/tofino/tif
+
+### CMake ###
+CMakeLists.txt.user
+CMakeCache.txt
+CMakeFiles
+CMakeScripts
+Testing
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps
+
+### CMake Patch ###
+# External projects
+*-prefix/
