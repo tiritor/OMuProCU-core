@@ -29,12 +29,18 @@ typedef bit<FLOW_MONITORING_VALUE_WIDTH> byte_count_t;
 typedef bit<FLOW_MONITORING_TIMESTAMP_WIDTH> time_t;
 typedef bit<64> time_t_extended;
 
+const ether_type_t ETHERTYPE_ARP  = 0x0806;
+const ether_type_t ETHERTYPE_TPID = 0x8100;
 const ether_type_t ETHERTYPE_IPV4 = 0x0800;
+const ether_type_t ETHERTYPE_IPV6 = 0x86dd;
 const ether_type_t ETHERTYPE_FLOW_MONITORING = 0x4242;
 const ether_type_t ETHERTYPE_FLOW_EXPORT_REQUEST = 0x2121;
 const ether_type_t ETHERTYPE_FLOW_EXPORT_RESPONSE = 0x1212;
 enum bit<16> ether_types_t {
     IPV4                 = ETHERTYPE_IPV4,
+    IPV6                 = ETHERTYPE_IPV6,
+    TPID                 = ETHERTYPE_TPID,
+    ARP                  = ETHERTYPE_ARP,
     FLOW_MONITORING      = ETHERTYPE_FLOW_MONITORING,
     FLOW_EXPORT_REQUEST  = ETHERTYPE_FLOW_EXPORT_REQUEST,
     FLOW_EXPORT_RESPONSE = ETHERTYPE_FLOW_EXPORT_RESPONSE
@@ -54,6 +60,25 @@ header ethernet_h {
     ether_type_t  ether_type;
 }
 const bit<16> ETHERNET_H_LENGTH = 14;
+
+header arp_h {
+    bit<16> hrd; // Hardware Type
+    bit<16> pro; // Protocol Type
+    bit<8> hln; // Hardware Address Length
+    bit<8> pln; // Protocol Address Length
+    bit<16> op;  // Opcode
+    mac_address_t sha; // Sender Hardware Address
+    ipv4_address_t spa; // Sender Protocol Address
+    mac_address_t tha; // Target Hardware Address
+    ipv4_address_t tpa; // Target Protocol Address
+}
+
+header vlan_tag_h {
+    bit<3>        pcp;
+    bit<1>        cfi;
+    bit<12>       vid;
+    ether_type_t  ether_type;
+}
 
 header ipv4_h {
     bit<4>          version;
@@ -261,6 +286,7 @@ struct metadata_t {
 
 struct headers_t {
     ethernet_h     ethernet;
+    arp_h          arp;
     ipv4_h         ipv4;
     ipv4_options_h ipv4_options;
     icmp_h         icmp;

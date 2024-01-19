@@ -24,7 +24,7 @@
 #include "include/parser.p4"
 
 // OTFs Includes
-
+{{ otf_includes }}
 
 
 
@@ -38,20 +38,121 @@ control TenantINCFrameworkIngress(inout headers_t hdr,
                               inout ingress_intrinsic_metadata_for_deparser_t ig_dprsr_md, 
                               inout ingress_intrinsic_metadata_for_tm_t ig_tm_md) {
     
+    Hash<bit<32>>(HashAlgorithm_t.CRC32) hash_algo;
+    selector_hash_t hash = 0;
+    nexthop_id_t nexthop_id = 0;
+    bit<8> ttl_dec = 0;
+
+    ActionProfile(size = MAX_PROFILE_MEMBERS) lag_ecmp;
+    Hash<bit<(HASH_WIDTH)>>(HashAlgorithm_t.IDENTITY) final_hash;
+
+    ActionSelector(
+        action_profile = lag_ecmp,
+        hash           = final_hash,
+        mode           = SELECTION_MODE,
+        max_group_size = MAX_GROUP_SIZE,
+        num_groups     = MAX_GROUPS) lag_ecmp_sel;
+
+    action send(PortId_t port) {
+        ig_tm_md.ucast_egress_port = port;
+        ttl_dec = 0;
+    }
+
+    action drop() {
+        ig_dprsr_md.drop_ctl = 1;
+    }
+
+    action l3_switch(PortId_t port, bit<48> new_mac_da, bit<48> new_mac_sa) {
+        hdr.ethernet.dst_addr = new_mac_da;
+        hdr.ethernet.src_addr = new_mac_sa;
+        ttl_dec = 1;
+        ig_tm_md.ucast_egress_port = port;
+        
+    }
+
+    action set_nexthop(nexthop_id_t nexthop) {
+        nexthop_id = nexthop;
+    }
+
+    action decrement (inout bit<8> value, in bit<8> amount) {
+        value = value - amount;
+    }
+
+    table arp_table {
+        key = { 
+            hdr.arp.tpa : exact; 
+            // hdr.arp.op : exact;
+            }
+        actions = {
+            set_nexthop;
+            // @defaultonly NoAction;
+        }
+        default_action = set_nexthop(0);
+        size = 65536;
+    }
+
+    table ipv4_host {
+        key = { hdr.ipv4.dst_addr : exact; }
+        actions = {
+            set_nexthop;
+            @defaultonly NoAction;
+        }
+        const default_action = NoAction();
+        size = 65536;
+    }
+
+    table ipv4_lpm {
+        key     = { hdr.ipv4.dst_addr : lpm; }
+        actions = { set_nexthop; }
+        
+        default_action = set_nexthop(0);
+        size           = 12288;
+    }
+
+    table nexthop {
+        key = {
+            nexthop_id : exact;
+            hash       : selector;
+        }
+        actions = { send; drop; l3_switch; }
+        size = 16384;
+        implementation = lag_ecmp_sel;
+    }
 
     apply {
-        meta.packet_length = (bit<32>) (hdr.ipv4.total_length + ETHERNET_H_LENGTH);
+        if (hdr.ipv4.isValid()) {
 
-        if (ig_intr_md.ingress_port == 144) { ig_tm_md.ucast_egress_port = 145; }
-        if (ig_intr_md.ingress_port == 145) { ig_tm_md.ucast_egress_port = 144; }
+            hash = hash_algo.get({
+                hdr.ipv4.src_addr,
+                hdr.ipv4.dst_addr,
+                hdr.ipv4.protocol,
+                meta.l4_meta.src_port,
+                meta.l4_meta.dst_port
+            });
+
+            // calc_ipv4_hashes.apply(hdr, meta, hash);
+            // if (meta.ipv4_checksum_err == 0 && hdr.ipv4.ttl > 1) {
+                if (!ipv4_host.apply().hit) {
+                    ipv4_lpm.apply();
+                }
+            // }
+        } else if (hdr.arp.isValid()) {
+            arp_table.apply();
+            // send(145);
+        }
+
+        nexthop.apply();
+
+        // meta.packet_length = (bit<32>) (hdr.ipv4.total_length + ETHERNET_H_LENGTH);
+
+        // if (ig_intr_md.ingress_port == 144) { ig_tm_md.ucast_egress_port = 145; }
+        // if (ig_intr_md.ingress_port == 145) { ig_tm_md.ucast_egress_port = 144; }
         
-        if ( hdr.ethernet.ether_type != ether_types_t.IPV4) { exit; }
+        
+        // if ( hdr.ethernet.ether_type != ether_types_t.IPV4) { exit; }
 
         // // [In-Network Tenant Controller --> OTFs]
-        if (hdr.vxlan.isValid()) { 
-			  
-			 }
-
+        {{ in_network_tenant_controller_logic }}
 
 
         // // [Conditional Data Export (CDE)]
@@ -60,6 +161,11 @@ control TenantINCFrameworkIngress(inout headers_t hdr,
         }
         // // [Tenant Flow Filter]
         // Here would be the implementation for a filtering mechanism for the multi-tenant environment.
+
+
+        // if (hdr.ipv4.isValid()) {
+        //     decrement(hdr.ipv4.ttl, ttl_dec);
+        // }
 
     }
     

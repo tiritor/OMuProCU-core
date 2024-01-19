@@ -42,8 +42,8 @@ control TenantINCFrameworkIngress(inout headers_t hdr,
     apply {
         meta.packet_length = (bit<32>) (hdr.ipv4.total_length + ETHERNET_H_LENGTH);
 
-        if (ig_intr_md.ingress_port == 44) { ig_tm_md.ucast_egress_port = 45; }
-        if (ig_intr_md.ingress_port == 45) { ig_tm_md.ucast_egress_port = 44; }
+        if (ig_intr_md.ingress_port == 144) { ig_tm_md.ucast_egress_port = 145; }
+        if (ig_intr_md.ingress_port == 145) { ig_tm_md.ucast_egress_port = 144; }
         
         if ( hdr.ethernet.ether_type != ether_types_t.IPV4) { exit; }
 

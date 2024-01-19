@@ -1,0 +1,9 @@
+ucli
+pm
+{% for port in ports %}
+port-dis {{ port.port }}/0
+port-enb {{ port.port }}/0
+{% endfor %}
+show
+exit
+exit

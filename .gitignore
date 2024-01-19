@@ -8,7 +8,7 @@ data
 inc_template/p4build/**
 inc_template/*.txt
 **/build
-inc_template/tofino/tenant_inc
+inc_template/**/tenant_inc
 inc_template/tofino/tif
 
 ### CMake ###

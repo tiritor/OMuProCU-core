@@ -1,6 +1,7 @@
 
 
 import base64
+from enum import Enum
 import hashlib
 import json
 import subprocess
@@ -150,7 +151,7 @@ class Tofino(Accelerator):
     switches = []
     otf_apply_parameter = "hdr, meta, ig_intr_md"
 
-    def __init__(self, path="inc_template/tofino/", out_path=None, dev_init_mode=ACCELERATOR_CONFIGURATION["tofino"]["dev_init_mode"]) -> None:
+    def __init__(self, path="inc_template/" + ACCELERATOR_CONFIGURATION["tofino"]["template"].value, out_path=None, dev_init_mode=ACCELERATOR_CONFIGURATION["tofino"]["dev_init_mode"]) -> None:
         super().__init__(path, dev_init_mode)
         if out_path is None:
             self.out_path = os.path.splitext(self.main_construct_file)[0] + "/tofino/"

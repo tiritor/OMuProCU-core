@@ -1,0 +1,17 @@
+p4 = bfrt.tenant_inc.pipe
+lag_ecmp = p4.TenantINCFrameworkIngress.lag_ecmp
+lag_ecmp_sel = p4.TenantINCFrameworkIngress.lag_ecmp_sel
+{% for lag in lagGroups %}
+mbr_base = {{ lag.memberbase }}
+memb_port_ids = []
+memb_port_active = []
+{% for port in lag.dp_ports %}
+port_{{ loop.index }} = mbr_base + {{ loop.index }}
+lag_ecmp.entry_with_send(port_{{ loop.index }}, port={{ port["portId"] }}).push()
+memb_port_ids.append(port_{{ loop.index }})
+memb_port_active.append({{ port["active"] }})
+{% endfor %}
+lag_{{ loop.index }} = {{ lag.id }}
+lag_ecmp_sel.entry(SELECTOR_GROUP_ID=lag_{{ loop.index }}, MAX_GROUP_SIZE=8, ACTION_MEMBER_ID=memb_port_ids, ACTION_MEMBER_STATUS=memb_port_active).push()
+    
+{% endfor %}

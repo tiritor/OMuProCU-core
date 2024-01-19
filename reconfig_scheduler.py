@@ -106,23 +106,35 @@ class ReconfigScheduler(Process, orchestrator_msg_pb2_grpc.SchedulerCommunicator
                                 elif resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_DELETED_FAILURE or resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_UPDATED_FAILURE:
                                         self.RSS.add(t_id, None, None, None, orchestrator_msg_pb2.SCHEDULE_STATUS_PROCESSING_FAILED)
                                 elif (resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_UPDATED_SUCCESS and self.RSS.scheduled_deployment_status[t_id] != orchestrator_msg_pb2.SCHEDULE_STATUS_PROCESSED) or resp.updateStatus != orchestrator_msg_pb2.UPDATE_STATUS_DELETED_SUCCESS:
-                                        with grpc.insecure_channel(INUPDATER_ADDRESS) as channel_2:
-                                            stub = orchestrator_msg_pb2_grpc.INUpdaterCommunicatorStub(channel_2)
-                                            resp = stub.GetUpdateStatus(orchestrator_msg_pb2.INUpdateRequest(
-                                                tenantMetadata = til_msg_pb2.TenantMetadata(
-                                                    tenantId = nos_config["tenantMetadata"]["tenantId"],
-                                                    tenantFuncName = nos_config["tenantMetadata"]["tenantFuncName"]
-                                                ),
-                                            ))
-                                            if resp.status == 200:
-                                                if resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_UPDATED_SUCCESS:
-                                                    self.RSS.add(t_id, None, None, None, orchestrator_msg_pb2.SCHEDULE_STATUS_PROCESSED)
-                                                elif resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_UPDATED_FAILURE or resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_DELETED_FAILURE:
-                                                    self.RSS.add(t_id, None, None, None, orchestrator_msg_pb2.SCHEDULE_STATUS_PROCESSING_FAILED)
-                                                elif resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_DELETED_SUCCESS:
-                                                    self.RSS.add(t_id, None, None, None, orchestrator_msg_pb2.SCHEDULE_STATUS_DELETED)
+                                    with grpc.insecure_channel(INUPDATER_ADDRESS) as channel_2:
+                                        stub = orchestrator_msg_pb2_grpc.INUpdaterCommunicatorStub(channel_2)
+                                        resp = stub.GetUpdateStatus(orchestrator_msg_pb2.INUpdateRequest(
+                                            tenantMetadata = til_msg_pb2.TenantMetadata(
+                                                tenantId = nos_config["tenantMetadata"]["tenantId"],
+                                                tenantFuncName = nos_config["tenantMetadata"]["tenantFuncName"]
+                                            ),
+                                        ))
+                                        if resp.status == 200:
+                                            if resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_UPDATED_SUCCESS:
+                                                self.RSS.add(t_id, None, None, None, orchestrator_msg_pb2.SCHEDULE_STATUS_PROCESSED)
+                                            elif resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_UPDATED_FAILURE or resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_DELETED_FAILURE:
+                                                self.RSS.add(t_id, None, None, None, orchestrator_msg_pb2.SCHEDULE_STATUS_PROCESSING_FAILED)
+                                            elif resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_DELETED_SUCCESS:
+                                                self.RSS.add(t_id, None, None, None, orchestrator_msg_pb2.SCHEDULE_STATUS_DELETED)
+                                        elif resp.status == 404:
+                                            if deployment_status == orchestrator_msg_pb2.SCHEDULE_STATUS_SCHEDULED or deployment_status == orchestrator_msg_pb2.SCHEDULE_STATUS_UNSPECIFIED:
+                                                self.logger.debug("Deployment {} is scheduled (or waiting to be scheduled) and not yet processed.".format(t_id))
+                                                continue
                                             else:
                                                 raise Exception("Error in INUPDATER: {} (status: {})".format(resp.message, resp.status))
+                                        else:
+                                            raise Exception("Error in INUPDATER: {} (status: {})".format(resp.message, resp.status))
+                            elif resp.status == 404:
+                                if deployment_status == orchestrator_msg_pb2.SCHEDULE_STATUS_SCHEDULED or deployment_status == orchestrator_msg_pb2.SCHEDULE_STATUS_UNSPECIFIED:
+                                    self.logger.debug("Deployment {} is scheduled (or waiting to be scheduled) and not yet processed.".format(t_id))
+                                    continue
+                                else:
+                                    raise Exception("Error in NOSUPDATER: {} (status: {})".format(resp.message, resp.status))
                             else:
                                 raise Exception("Error in NOSUPDATER: {} (status: {})".format(resp.message, resp.status))
                 except Exception as ex:

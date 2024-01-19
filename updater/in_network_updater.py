@@ -88,9 +88,9 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
                             }
                         })
                 if dev_init_mode is None:
-                    self.accelerator_compilers.update({accelerator.value: acceleratorClasses[accelerator.value]("inc_template/{}/".format(accelerator.value))})
+                    self.accelerator_compilers.update({accelerator.value: acceleratorClasses[accelerator.value]("inc_template/{}/".format(ACCELERATOR_CONFIGURATION[accelerator.value]["template"].value))})
                 else:
-                    self.accelerator_compilers.update({accelerator.value: acceleratorClasses[accelerator.value]("inc_template/{}/".format(accelerator.value), dev_init_mode)})
+                    self.accelerator_compilers.update({accelerator.value: acceleratorClasses[accelerator.value]("inc_template/{}/".format(ACCELERATOR_CONFIGURATION[accelerator.value]["template"].value), dev_init_mode)})
                 
                 self.otf_generators.update({accelerator.value: OTFGenerator("inc_template/{}/".format(accelerator.value), "inc_template/{}/".format(accelerator.value), self.accelerator_compilers[accelerator.value].otf_apply_parameter)})
         
@@ -327,6 +327,9 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
                 self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["mainIngressName"] = mainIngressName
                 self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["accessRules"] = accessRules
                 self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["updateAction"] = updateAction
+                # self.tenant_cnf_accelerator_map[tenant_cnf_id] = find_python_acceleratorTypeEnum(acceleratorType)
+                if tenant_cnf_id in self.old_tenant_cnf_accelerator_map.keys():
+                    self.tenant_cnf_accelerator_map[tenant_cnf_id] = self.old_tenant_cnf_accelerator_map.pop(tenant_cnf_id)
             if inTConfig.acceleratorType == ACCELERATOR_TYPE_UNSPECIFIED:
                 message += "Accelerator type is unspecified!"
                 self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["status"] = UPDATE_STATUS_UPDATED_FAILURE
@@ -517,7 +520,8 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
                         if key != "general":
                             self.tenants_code_definitions[accelerator.value].pop(key)
                             self.tenants_cnf_name_id[accelerator.value].pop(key)
-                            self.otf_generators[accelerator.value].delete_otf(key)
+                            if self.otf_generators[accelerator.value].is_otf_in_generator(key):
+                                self.otf_generators[accelerator.value].delete_otf(key)
                     except KeyError as err:
                         self.logger.error("{} in {} does not exist!".format(key, accelerator.value))
                 # Call update once to reset the applied in-network

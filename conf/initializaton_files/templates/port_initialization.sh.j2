@@ -1,0 +1,15 @@
+ucli
+pm
+{% for port in ports %}
+port-add {{ port.port }}/0 {{ port.speed }} {{ port.fec }}
+an-set {{ port.port }}/0 {{ port.an }}
+{% if port.enabled %}
+port-enb {{ port.port }}/0
+{% else %}
+port-dis {{ port.port }}/0
+{% endif %}
+{% endfor %}
+show
+exit
+exit
+

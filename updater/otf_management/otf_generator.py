@@ -4,6 +4,7 @@ import logging
 import os
 from pathlib import Path
 from jinja2 import FileSystemLoader, Environment
+from codecs import unicode_escape_decode
 
 from orchestrator_utils.logger.logger import init_logger
 
@@ -43,7 +44,7 @@ class OTFGenerator(object):
         self.logger.debug(format_string)
         return format_string
 
-    def _save_p4code_to_file(self, tenant_cnf_id, p4code):
+    def _save_p4code_to_file(self, tenant_cnf_id, p4code : str):
         """
         Save the OTF p4code to file.
 
@@ -57,6 +58,8 @@ class OTFGenerator(object):
         try:
             self.logger.info("Save p4 code from {} to {}".format(tenant_cnf_id, "./" + self.path + self.otf_path + tenant_cnf_id + ".p4"))
             with open("./" + self.path + self.otf_path + tenant_cnf_id + ".p4", "w") as f:
+                if p4code.find("\\") != -1:
+                    p4code, _ = unicode_escape_decode(p4code)
                 f.write(p4code)
         except Exception as ex:
             self.logger.exception(ex, exc_info=True)
@@ -127,7 +130,22 @@ class OTFGenerator(object):
             vni_str += ")"
         self.logger.debug(vni_str)
         return vni_str
-        
+    
+    def is_otf_in_generator(self, tenant_cnf_id):
+        """
+        Check if the given tenant_cnf_id is present in the otf_generator's otfs_by_code dictionary.
+
+        Parameters:
+        -----------
+        tenant_cnf_id: str
+            The tenant_cnf_id to check.
+
+        Returns:
+        --------
+        bool: True if the tenant_cnf_id is present, False otherwise.
+        """
+        return tenant_cnf_id in self.otfs_by_code.keys()
+
     def add_otf_by_code(self, tenant_cnf_id, tenant_func_id_num, vnis, main_ingress, p4code):
         """
         Method to add OTF to a template.

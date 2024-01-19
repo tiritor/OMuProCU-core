@@ -1,0 +1,60 @@
+from netaddr import EUI, IPAddress
+
+p4 = bfrt.tenant_inc.pipe
+lag_ecmp = p4.TenantINCFrameworkIngress.lag_ecmp
+lag_ecmp_sel = p4.TenantINCFrameworkIngress.lag_ecmp_sel
+{% for lag_name, lag_md in lagGroups.items() %}
+mbr_base = {{ lag_md.memberbase }}
+memb_port_ids = []
+memb_port_active = []
+{% for port in lag_md.dp_ports %}
+port_{{ loop.index }} = mbr_base + {{ loop.index }}
+lag_ecmp.entry_with_send(port_{{ loop.index }}, port={{ port["portId"] }}).push()
+memb_port_ids.append(port_{{ loop.index }})
+memb_port_active.append({{ port["active"] }})
+{% endfor %}
+{{ lag_name }} = {{ lag_md.id }}
+lag_ecmp_sel.entry(SELECTOR_GROUP_ID={{ lag_name }}, MAX_GROUP_SIZE=8, ACTION_MEMBER_ID=memb_port_ids, ACTION_MEMBER_STATUS=memb_port_active).push()
+{% endfor %}
+
+nexthop = p4.TenantINCFrameworkIngress.nexthop
+{% for name, id in nexthop_map.items() %}
+{% if name != "default" %}
+nexthop.entry(nexthop_id={{ id }}, SELECTOR_GROUP_ID={{ name }}).push()
+{% endif %}
+{% endfor %}
+
+ipv4_lpm = p4.TenantINCFrameworkIngress.ipv4_lpm
+{# {% for name, id in ipv4_lpm.items() %}
+{% endfor %} #}
+ipv4_lpm.set_default_with_set_nexthop(nexthop={{ nexthop_map["default"] }})
+
+ipv4_host = p4.TenantINCFrameworkIngress.ipv4_host
+{% for entry in ipv4_host_entries %}
+ipv4_host.entry_with_set_nexthop(dst_addr=IPAddress('{{ entry["ip"] }}'), nexthop={{ entry["nexthop_id"] }}).push()
+{% endfor %}
+
+arp_table = p4.TenantINCFrameworkIngress.arp_table
+{% for entry in arp_table_entries %}
+arp_table.entry_with_set_nexthop(tpa=IPAddress('{{ entry["ip"] }}'), nexthop={{ entry["nexthop_id"] }}).push()
+{% endfor %}
+arp_table.set_default_with_set_nexthop(nexthop={{ nexthop_map["default"] }})
+
+print("""
+******************* PROGRAMMING RESULTS *****************
+""")
+
+print ("Table arp_table:")
+arp_table.dump(table=True)
+print ("Table ipv4_lpm:")
+ipv4_lpm.dump(table=True)
+print ("Table ipv4_host:")
+ipv4_host.dump(table=True)
+# print ("Table ipv6_host:")
+# ipv6_lpm.dump(table=True)
+print ("Table nexthop:")
+nexthop.dump()  # There is a bug in SDE-9.2.0 that doesn't allow table=True here
+print ("ActionSelector lag_ecmp_sel:")
+lag_ecmp_sel.dump(table=True)
+print ("ActionProfile lag_ecmp:")
+lag_ecmp.dump(table=True)

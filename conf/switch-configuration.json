@@ -1,0 +1,26 @@
+{
+  "lag_ecmp_groups": {},
+  "nexthop_map": {
+    "default": 100
+  },
+  "ipv4_host_entries": [],
+  "arp_table_host_entries": [],
+  "initialized_ports": [
+    {
+      "port": 18,
+      "dp": 45,
+      "speed": "25G",
+      "fec": "RS",
+      "an": 1,
+      "enabled": true
+    },
+    {
+      "port": 17,
+      "dp": 44,
+      "speed": "25G",
+      "fec": "RS",
+      "an": 1,
+      "enabled": true
+    }
+  ]
+}

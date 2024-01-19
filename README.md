@@ -1,12 +1,13 @@
 # OMuProCU Core
 
-This repository contains the core framework of the paper `Low Impact Tenant Code Updates on Multi-tenant Programmable Switches`.
+This repository contains the core framework of the paper [`Low Impact Tenant Code Updates on Multi-tenant Programmable Switches`](https://ieeexplore.ieee.org/abstract/document/10327866) where the first version was presented.
+Meanwhile, an extended version of the core framework is added used in the paper `Orchestrating Multi-Tenant Code Updates Across Multiple Programmable Switches`.
 
 As interface to use the Tofino 1 chip, the proposed [Open-Tofino Code](https://github.com/barefootnetworks/Open-Tofino) is used. 
 
 ## Disclaimer
 
-> The proposed framework uses proprietary software and APIs to initialize hardware, etc. after updating the hardware. Since these are licensed, this was removed, and must be added again or done manually, to get the full functional version used in the paper!
+> The framework proposed in the used proprietary software and APIs to initialize hardware, etc. after updating the hardware. Since these are licensed, this was removed, and must be added again or done manually, to get the full functional version used in the paper!
 
 
 ## Requirements
@@ -65,7 +66,7 @@ The OMuProCU core consists of different microservices:
 - [In-Network Updater](#in-network-updater)
 - [TIF Updater](#tif-updater)
 
-Also, there are some modules which are used from the [OMuProCU-utils]() package like:
+Also, there are some modules which are used from the [OMuProCU-utils](https://github.com/tiritor/OMuProCU-utils) package like:
 
 - Validator
 - Persistor

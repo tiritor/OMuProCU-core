@@ -5,6 +5,7 @@ from enum import Enum
 import logging
 import os
 import signal
+import socket
 from sys import argv
 import threading
 import time
@@ -20,6 +21,7 @@ from orchestrator_utils.tools.accelerator_type import find_protobuf_acceleratorT
 from orchestrator_utils.tools.countermeasure_action import CountermeasureAction
 from orchestrator_utils.tools.persistence import Persistor
 from orchestrator_utils.til import orchestrator_msg_pb2, orchestrator_msg_pb2_grpc, til_msg_pb2, til_msg_pb2_grpc, time_measurement_pb2_grpc, time_measurement_pb2
+from orchestrator_utils.states import DeploymentStatus
 from orchestrator_utils.validator import TDCValidationException, TDCValidator, ValidationException
 
 from conf.grpc_settings import INUPDATER_ADDRESS, NOSUPDATER_ADDRESS, ORCHESTRATOR_ADDRESS, SCHEDULE_ADDRESS, TCC_ADDRESS
@@ -34,21 +36,6 @@ INTERACTIVE = False
 CLEANUP_BY_TERMINATE = True
 running = False
 
-class DeploymentStatus(Enum):
-    """
-    Pipeline Status
-    """
-    UNSPECIFIED = 0
-    VALIDATING = 1
-    SCHEDULING = 2
-    SCHEDULED = 3
-    UPDATING = 4
-    NOS_UPDATED = 5
-    IN_UPDATED = 6
-    RUNNING = 7
-    DELETED = 8
-    REQUEST_DELETE = 9
-    FAILED = 10
 
 class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
     """
@@ -62,6 +49,7 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
         self.MANAGEMENT_TENANT_FUNC_NAME = "OMuProCU-management"
         self.codeValidator = TDCValidator()
         self.tenants_status = {}
+        self.tenants_previous_status = {}
         self.orchestrator_timemeasurement = {}
         self.orchestrator_timemeasurement_fetched = {}
         self.orchestrator_timemeasurement_df = pd.DataFrame(columns=[
@@ -175,6 +163,32 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
             message = message
         )
 
+    def CheckHealth(self, request, context):
+        """
+        Check the health of the orchestrator.
+
+        Returns:
+            A DeploymentResponse object with the status and message.
+        """
+        return til_msg_pb2.DeploymentResponse(status=200, message="OMuProCU healthy.")
+
+    def GetDeploymentMonitorStatus(self, request, context):
+        """
+        Get the deployment monitor status for a specific tenant.
+
+        Returns:
+            A DeploymentResponse object containing the deployment status and message.
+        """
+        tenantId = request.tenantMetadata.tenantId
+        tenantFuncName = request.tenantMetadata.tenantFuncName
+        if tenantId in self.tenants_status:
+            if tenantFuncName in self.tenants_status[tenantId]:
+                return til_msg_pb2.DeploymentResponse(status=200, message="Deployment Status for {} of Tenant ID {} is {}".format(tenantFuncName, tenantId, self.tenants_status[tenantId][tenantFuncName].name), deploymentStatus=self.tenants_status[tenantId][tenantFuncName].value)
+            else:
+                return til_msg_pb2.DeploymentResponse(status=404, message="Tenant Function Name {} for Tenant ID {} not found".format(tenantId, tenantFuncName))
+        else:
+            return til_msg_pb2.DeploymentResponse(status=404, message="Tenant ID {} not found".format(tenantId), deploymentStatus=til_msg_pb2.DEPLOYMENT_STATUS_UNSPECIFIED)
+
     def RestartSchedulerLoop(self, request, context):
         """
         GPRC implementation to restart the reconfiguration scheduler loop.
@@ -257,17 +271,24 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
         tenantId = None
         tenantFuncName = None
         valid = False
+        # FIXME: This must be backported for the OMUProCU paper release.
         update_request = update_action == orchestrator_msg_pb2.UPDATE_ACTION_UPDATE
+        delete_request = update_action == orchestrator_msg_pb2.UPDATE_ACTION_DELETE
         if deployment is not None:
-            valid = self.codeValidator.validate(deployment=deployment, update_request=update_request)
+            valid = self.codeValidator.validate(deployment=deployment, update_request=update_request, delete_request=delete_request)
         elif path is not None: 
-            valid = self.codeValidator.validate(path=path, update_request=update_request)
+            valid = self.codeValidator.validate(path=path, update_request=update_request, delete_request=delete_request)
         else:
             raise ValidationException("Preprocess needs deployment or path to be set!")
         if valid:
             tenantId = self.codeValidator.tdc["id"] 
             tenantFuncName = self.codeValidator.tdc["name"] 
-            self.tenants_status.update({tenantId: {tenantFuncName: DeploymentStatus.VALIDATING}})             
+            if tenantId in self.tenants_status:
+                if tenantFuncName in self.tenants_status[tenantId]:
+                    if tenantId not in self.tenants_previous_status:
+                        self.tenants_previous_status[tenantId] = {}
+                    self.tenants_previous_status[tenantId][tenantFuncName] = self.tenants_status[tenantId][tenantFuncName]
+            self.tenants_status.update({tenantId: {tenantFuncName: DeploymentStatus.VALIDATING}}) 
             params = {
                 "kube_file": self.codeValidator.tcd["kubernetesDeploymentFile"] if "kubernetesDeploymentFile" in self.codeValidator.tcd.keys() else "",
                 "state": "started"
@@ -330,7 +351,7 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
             elif resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_UPDATED_FAILURE:
                 self.tenants_status[tenantId][tenantFuncName] = DeploymentStatus.FAILED
             elif resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_DELETED_SUCCESS:
-                self.tenants_status[tenantId][tenantFuncName] = DeploymentStatus.DELETED
+                self.tenants_status[tenantId][tenantFuncName] = DeploymentStatus.NOS_UPDATED
             elif resp.updateStatus== orchestrator_msg_pb2.UPDATE_STATUS_DELETED_FAILURE:
                 self.tenants_status[tenantId][tenantFuncName] = DeploymentStatus.FAILED
         elif resp.status == 404 and scheduleStatus == orchestrator_msg_pb2.SCHEDULE_STATUS_DELETED:
@@ -417,7 +438,7 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
             elif resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_UPDATED_FAILURE or resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_DELETED_FAILURE:
                 self.tenants_status.update({tenantId: {tenantFuncName: DeploymentStatus.FAILED}})
             elif resp.updateStatus == orchestrator_msg_pb2.UPDATE_STATUS_DELETED_SUCCESS:
-                self.tenants_status.update({tenantId: {tenantFuncName: DeploymentStatus.DELETED}})
+                self.tenants_status.update({tenantId: {tenantFuncName: DeploymentStatus.IN_UPDATED}})
             else:
                 pass
             return resp
@@ -496,7 +517,7 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
 
     def status_loop(self):
         """
-        Status loop for health check of scheduled and commisioned deployments.
+        Status loop for health check of scheduled and commissioned deployments.
         """
         while self.running:
             tenantIds = list(self.tenants_status.keys())
@@ -527,11 +548,11 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
                         with open("conf/tenant_security_config.json", "r") as f:
                             tenant_security_config = json.load(f)
                         if self.tenants and tenantId in self.tenants.keys():
-                            if self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"] in tenant_security_config[str(tenantId)]["mainIngressNames"]:
-                                tenant_security_config[str(tenantId)]["mainIngressNames"].remove(self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"])
+                            if self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"] in tenant_security_config[str(tenantId)]["devices"]["default"]["mainIngressNames"]:
+                                tenant_security_config[str(tenantId)]["devices"]["default"]["mainIngressNames"].remove(self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"])
                         with open("conf/tenant_security_config.json", "w") as f:
                             f.write("")
-                            json.dump(tenant_security_config, f)
+                            json.dump(tenant_security_config, f, indent=2)
                         ### Rollback to old deployment if available, depending also used accelerator and its TIF besides the NOS deployment.
                     elif self.tenants_status[tenantId][tenantFuncName] == DeploymentStatus.REQUEST_DELETE:
                         resp = self._check_scheduler_update(tenantId, tenantFuncName)
@@ -547,11 +568,11 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
                         with open("conf/tenant_security_config.json", "r") as f:
                             tenant_security_config = json.load(f)
                         if self.tenants and tenantId in self.tenants.keys():
-                            if self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"] in tenant_security_config[str(tenantId)]["mainIngressNames"]:
-                                tenant_security_config[str(tenantId)]["mainIngressNames"].remove(self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"])
+                            if self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"] in tenant_security_config[str(tenantId)]["devices"]["default"]["mainIngressNames"]:
+                                tenant_security_config[str(tenantId)]["devices"]["default"]["mainIngressNames"].remove(self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"])
                         with open("conf/tenant_security_config.json", "w") as f:
                             f.write("")
-                            json.dump(tenant_security_config, f)
+                            json.dump(tenant_security_config, f, indent=2)
                         ### Here can be introduce a Garbage Collection System to clean up very old deleted TDCs.
             self.logger.info(self.tenants_status)
             time.sleep(5)
@@ -567,7 +588,11 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
         tenantFuncName : str
             Function name provided in the TDC
         """
-        return self.tenants_status[tenantId][tenantFuncName] == DeploymentStatus.NOS_UPDATED or self.tenants_status[tenantId][tenantFuncName] == DeploymentStatus.IN_UPDATED or self.tenants_status[tenantId][tenantFuncName] == DeploymentStatus.UPDATING
+        if tenantId in self.tenants_status.keys():
+            if tenantFuncName in self.tenants_status[tenantId].keys():
+                return self.tenants_status[tenantId][tenantFuncName] == DeploymentStatus.NOS_UPDATED or self.tenants_status[tenantId][tenantFuncName] == DeploymentStatus.IN_UPDATED or self.tenants_status[tenantId][tenantFuncName] == DeploymentStatus.UPDATING
+            # return False
+        return False
 
     def set_status_of_tenant_cnf(self, tenantId, tenantFuncName, status : DeploymentStatus):
         """
@@ -601,22 +626,24 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
         """
         try:
             if deployment is not None and not os.path.exists(deployment): 
-                tenantId, tenantFuncName, params, validation_time = self.preprocess(deployment=deployment)
+                tenantId, tenantFuncName, params, validation_time = self.preprocess(deployment=deployment, update_action=orchestrator_msg_pb2.UPDATE_ACTION_CREATE)
             elif tdc_path is not None:
-                tenantId, tenantFuncName, params, validation_time = self.preprocess(path=tdc_path)
+                tenantId, tenantFuncName, params, validation_time = self.preprocess(path=tdc_path, update_action=orchestrator_msg_pb2.UPDATE_ACTION_CREATE)
             elif os.path.exists(deployment):
-                tenantId, tenantFuncName, params, validation_time = self.preprocess(path=deployment)
+                tenantId, tenantFuncName, params, validation_time = self.preprocess(path=deployment, update_action=orchestrator_msg_pb2.UPDATE_ACTION_CREATE)
             else: 
                 raise ValidationException("Deployment or Path to TDC must be set!")
         except ValidationException as tdc_ex:
             self.logger.exception(tdc_ex, exc_info=True)
+            self.set_status_of_tenant_cnf(tenantId, tenantFuncName, DeploymentStatus.FAILED)
             return 500, tdc_ex.__str__()
 
-        tenantFuncName = self._build_tenant_cnf_id(tenantId, tenantFuncName)
+        tenant_cnf_id = self._build_tenant_cnf_id(tenantId, tenantFuncName)
         if tenantId in self.tenants.keys():
             if tenantFuncName in self.tenants[tenantId].keys():
-                self.logger.error("Failed to create tenant function: {} does already exists!".format(tenantFuncName))
-                return 500, "Failed to create tenant function: {} does already exists!".format(tenantFuncName)
+                if self.tenants_previous_status[tenantId][tenantFuncName] != DeploymentStatus.DELETED:
+                    self.logger.error("Failed to create tenant function: {} does already exists!".format(tenantFuncName))
+                    return 500, "Failed to create tenant function: {} does already exists!".format(tenantFuncName)
         try:
             self.logger.debug(self.tenants)
             self.tenants.update({self.codeValidator.tdc_id: {tenantFuncName: {"params": params, "TDC": self.codeValidator.tdc, "lastAction" : orchestrator_msg_pb2.UPDATE_ACTION_CREATE}}}) 
@@ -655,18 +682,18 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
                 if resp.status == 200:
                     self.logger.info("Added Deployment.")
                     self.logger.debug("Debug Information: (status code: 200, message: {})".format(resp.message))
-                    if tenantFuncName not in self.orchestrator_timemeasurement.keys():
-                            self.orchestrator_timemeasurement[tenantFuncName] = {}
-                            self.orchestrator_timemeasurement_fetched[tenantFuncName] = {}
-                    self.orchestrator_timemeasurement[tenantFuncName][int(deployment_submission_time)] = {
+                    if tenant_cnf_id not in self.orchestrator_timemeasurement.keys():
+                            self.orchestrator_timemeasurement[tenant_cnf_id] = {}
+                            self.orchestrator_timemeasurement_fetched[tenant_cnf_id] = {}
+                    self.orchestrator_timemeasurement[tenant_cnf_id][int(deployment_submission_time)] = {
                             "action": orchestrator_msg_pb2.UPDATE_ACTION_CREATE,
                             "deploymentSubmissionTimestamp": deployment_submission_time,
                             "validationTime" : validation_time,
                         }
-                    self.orchestrator_timemeasurement_fetched[tenantFuncName][int(deployment_submission_time)] = False
+                    self.orchestrator_timemeasurement_fetched[tenant_cnf_id][int(deployment_submission_time)] = False
                     self.store_to_persistence(self.tenants)
                 else:
-                    self.logger.error("An error (status code: {}) occured while scheduling the update of {}: {}".format(resp.status, tenantFuncName, resp.message))
+                    self.logger.error("An error (status code: {}) occured while scheduling the update of {}: {}".format(resp.status, tenant_cnf_id, resp.message))
                 return resp.status, resp.message
         except Exception as ex:
             self.logger.exception(ex, exc_info=True)
@@ -687,18 +714,18 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
         """
         try:
             if deployment is not None: 
-                tenantId, tenantFuncName, params, validation_time = self.preprocess(deployment=deployment, update_request=True)
+                tenantId, tenantFuncName, params, validation_time = self.preprocess(deployment=deployment, update_action = orchestrator_msg_pb2.UPDATE_ACTION_UPDATE)
             elif tdc_path is not None:
-                tenantId, tenantFuncName, params, validation_time = self.preprocess(path=tdc_path, update_request=True)
+                tenantId, tenantFuncName, params, validation_time = self.preprocess(path=tdc_path, update_action = orchestrator_msg_pb2.UPDATE_ACTION_UPDATE)
             elif os.path.exists(deployment):
-                tenantId, tenantFuncName, params, validation_time = self.preprocess(path=deployment, update_request=True)
+                tenantId, tenantFuncName, params, validation_time = self.preprocess(path=deployment, update_action = orchestrator_msg_pb2.UPDATE_ACTION_UPDATE)
             else: 
                 raise ValidationException("Deployment or Path to TDC must be set!")
         except ValidationException as tdc_ex:
             self.logger.exception(tdc_ex, exc_info=True)
             return tdc_ex
 
-        tenantFuncName = self._build_tenant_cnf_id(tenantId, tenantFuncName)
+        tenant_cnf_id = self._build_tenant_cnf_id(tenantId, tenantFuncName)
 
         try:
             self.logger.debug(self.tenants)
@@ -742,19 +769,19 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
                 if resp.status == 200:
                     self.logger.info("Added/Changed Deployment.")
                     self.logger.debug("Debug Information: (status code: 200, message: {})".format(resp.message))
-                    if tenantFuncName not in self.orchestrator_timemeasurement.keys():
-                        self.orchestrator_timemeasurement[tenantFuncName] = {}
-                        self.orchestrator_timemeasurement_fetched[tenantFuncName] = {}
-                    self.orchestrator_timemeasurement[tenantFuncName][int(deployment_submission_time)] = {
+                    if tenant_cnf_id not in self.orchestrator_timemeasurement.keys():
+                        self.orchestrator_timemeasurement[tenant_cnf_id] = {}
+                        self.orchestrator_timemeasurement_fetched[tenant_cnf_id] = {}
+                    self.orchestrator_timemeasurement[tenant_cnf_id][int(deployment_submission_time)] = {
                                 "action": orchestrator_msg_pb2.UPDATE_ACTION_UPDATE,
                                 "deploymentSubmissionTimestamp": deployment_submission_time,
                                 "validationTime" : validation_time,
                         }
-                    self.orchestrator_timemeasurement_fetched[tenantFuncName][int(deployment_submission_time)] = False
+                    self.orchestrator_timemeasurement_fetched[tenant_cnf_id][int(deployment_submission_time)] = False
                     self.store_to_persistence(self.tenants)
                 else:
-                    self.logger.error("An error (status code: {}) occured while scheduling the update of {}: {}".format(resp.status, tenantFuncName, resp.message))
-                    raise Exception("An error (status code: {}) occured while scheduling the update of {}: {}".format(resp.status, tenantFuncName, resp.message))
+                    self.logger.error("An error (status code: {}) occured while scheduling the update of {}: {}".format(resp.status, tenant_cnf_id, resp.message))
+                    raise Exception("An error (status code: {}) occured while scheduling the update of {}: {}".format(resp.status, tenant_cnf_id, resp.message))
                 return resp.status, resp.message
         except Exception as ex:
             self.logger.exception(ex, exc_info=True)
@@ -932,11 +959,11 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
                     tenant_security_config = json.load(f)
                 for tenantId in self.tenants.keys():
                     for tenantFuncName in self.tenants[tenantId].keys():
-                        if self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"] in tenant_security_config[str(tenantId)]["mainIngressNames"]:
-                            tenant_security_config[str(tenantId)]["mainIngressNames"].remove(self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"])
+                        if self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"] in tenant_security_config[str(tenantId)]["devices"]["default"]["mainIngressNames"]:
+                            tenant_security_config[str(tenantId)]["devices"]["default"]["mainIngressNames"].remove(self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"])
                 with open("conf/tenant_security_config.json", "w") as f:
                     f.write("")
-                    json.dump(tenant_security_config, f)
+                    json.dump(tenant_security_config, f, indent=2)
                 self.tenants = {}
                 self.tenants_status = {}
                 self.store_to_persistence(self.tenants)
@@ -1004,6 +1031,7 @@ def main_loop():
 if __name__ == "__main__":
     dev_init_mode = 0
     experiment_protocol = ""
+    device_id = socket.gethostname()
     if len(argv) > 1:
         if "--no-cleanup" in argv:
             CLEANUP_BY_TERMINATE = False
@@ -1016,6 +1044,9 @@ if __name__ == "__main__":
         if "--experiment-protocol" in argv:
             index = argv.index("--experiment-protocol")
             experiment_protocol = argv[index + 1]
+        if "--device-id" in argv:
+            index = argv.index("--device-id")
+            device_id = argv[index + 1]
     try:
         logger = init_logger("Orchestrator")
         logger.info("Starting ReconfigScheduler")
@@ -1031,7 +1062,7 @@ if __name__ == "__main__":
         inUpdater.run()
         logger.info("INUpdater started")
         logger.info("Starting TIFUpdater Process")
-        tifUpdater = TIFUpdater()
+        tifUpdater = TIFUpdater(device_id)
         tifUpdater.run()
         logger.info("TIFUpdater started")
         logger.info("Starting TCC...")
