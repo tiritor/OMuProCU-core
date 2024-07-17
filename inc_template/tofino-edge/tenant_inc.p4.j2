@@ -81,11 +81,9 @@ control TenantINCFrameworkIngress(inout headers_t hdr,
     table arp_table {
         key = { 
             hdr.arp.tpa : exact; 
-            // hdr.arp.op : exact;
             }
         actions = {
             set_nexthop;
-            // @defaultonly NoAction;
         }
         default_action = set_nexthop(0);
         size = 65536;
@@ -143,14 +141,6 @@ control TenantINCFrameworkIngress(inout headers_t hdr,
 
         nexthop.apply();
 
-        // meta.packet_length = (bit<32>) (hdr.ipv4.total_length + ETHERNET_H_LENGTH);
-
-        // if (ig_intr_md.ingress_port == 144) { ig_tm_md.ucast_egress_port = 145; }
-        // if (ig_intr_md.ingress_port == 145) { ig_tm_md.ucast_egress_port = 144; }
-        
-        
-        // if ( hdr.ethernet.ether_type != ether_types_t.IPV4) { exit; }
-
         // // [In-Network Tenant Controller --> OTFs]
         {{ in_network_tenant_controller_logic }}
 
@@ -163,9 +153,9 @@ control TenantINCFrameworkIngress(inout headers_t hdr,
         // Here would be the implementation for a filtering mechanism for the multi-tenant environment.
 
 
-        // if (hdr.ipv4.isValid()) {
-        //     decrement(hdr.ipv4.ttl, ttl_dec);
-        // }
+        if (hdr.ipv4.isValid()) {
+            decrement(hdr.ipv4.ttl, ttl_dec);
+        }
 
     }
     

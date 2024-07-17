@@ -1,9 +1,14 @@
 
+import ast
 from concurrent import futures
+from distutils.command import build
+import ipaddress
 import json
 from multiprocessing import Process
 import os
 from pathlib import Path
+from re import T
+import re
 import shlex
 import subprocess
 import tempfile
@@ -24,7 +29,7 @@ from orchestrator_utils.p4.v1 import p4runtime_pb2, p4runtime_pb2_grpc
 from orchestrator_utils.p4.tmp import p4config_pb2
 from orchestrator_utils.p4.bmv2 import helper as p4info_help
 
-from conf.grpc_settings import TIF_ADDRESS
+from conf.grpc_settings import TIF_ADDRESS, maxMsgLength
 from conf.in_updater_settings import ACCELERATOR_CONFIGURATION, AcceleratorTemplates
 from conf.initializaton_files.port_conf import DEFAULT_PORTS
 
@@ -45,6 +50,22 @@ class TIFControlException(Exception):
     """
     pass
 
+def is_valid_mac(address):
+    """
+    Check if the provided string is a valid MAC address.
+    """
+    # Regular expression to match the MAC address
+    mac_pattern = re.compile(r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$')
+    return bool(mac_pattern.match(address))
+
+def is_valid_ipv4(address):
+    try:
+        ipaddress.IPv4Address(address)
+        return True
+    except ValueError:
+        return False
+
+
 class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorServicer, orchestrator_msg_pb2_grpc.TIFControlCommunicatorServicer):
     """
     The Tenant INC Framework Updater process. This handles the accelerator code and configuration update as well as the management of the accelerator.
@@ -52,10 +73,13 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
     tofino_grpc_address = "localhost:50052"
     bmv2_grpc_address = "localhost:9000" # If using BMv2, the GRPC port must be set to this or change properly!
     applied_forwarding_pipeline_configs = {}
+    applied_table_entries = {}
+    scheduled_table_entries = {}
+    management_tenant_id = 0
 
     def __init__(self, device_name, group=None, target=None, name=None, args=(), kwargs={}, daemon=None, bfrt_template_path = "conf/initializaton_files/templates/") -> None:
         super().__init__(group, target, name, args, kwargs, daemon=daemon)
-        self.grpc_server = grpc.server(futures.ThreadPoolExecutor(10))
+        self.grpc_server = grpc.server(futures.ThreadPoolExecutor(10), options=[('grpc.max_send_message_length', maxMsgLength), ('grpc.max_receive_message_length', maxMsgLength)])
         orchestrator_msg_pb2_grpc.add_TIFUpdateCommunicatorServicer_to_server(self, self.grpc_server)
         orchestrator_msg_pb2_grpc.add_TIFControlCommunicatorServicer_to_server(self, self.grpc_server)
         self.grpc_server.add_insecure_port(TIF_ADDRESS)
@@ -73,10 +97,29 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
                 "lag_ecmp_groups" : {},
                 "nexthop_map": {},
                 "ipv4_host_entries": {},
-                "arp_table_host_entries": {}
+                "arp_table_host_entries": {},
+                "tenant_rules": {},
             }
         if device_name is not None and self.switch_configuration["initialized_ports"] is None:
             self.switch_configuration["initialized_ports"] = DEFAULT_PORTS[device_name]
+
+    @staticmethod
+    def _build_tenant_cnf_id(tenant_id, tenant_func_name):
+        """
+        Build a tenant configuration ID.
+
+        Parameters:
+        -----------
+        tenant_id : int
+            The tenant ID.
+        tenant_func_name : str
+            The tenant function name.
+
+        Returns:
+        --------
+        str: The tenant configuration ID.
+        """
+        return str(tenant_id) + "_" + tenant_func_name
 
     def run(self) -> None:
         super().run()
@@ -263,13 +306,22 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
         TIFControlResponse: The control response object containing the table entries.
         """
         try:
-            return TIFControlResponse(
-                status=200,
-                message="Got Table Entries successfully",
-                arpHostEntries=[ParseDict({"key": entry["ip"], "nextHopId": entry["nexthop_id"]}, RoutingTableConfiguration()) for entry in self.switch_configuration["arp_table_host_entries"]],
-                ipv4HostEntries=[ParseDict({"key": entry["ip"], "nextHopId": entry["nexthop_id"]}, RoutingTableConfiguration()) for entry in self.switch_configuration["ipv4_host_entries"]],
-                nexthopMapEntries=[ParseDict({"key": key, "nextHopId": value}, RoutingTableConfiguration()) for key, value in self.switch_configuration["nexthop_map"].items()],
-            )
+            if request.tenantMetadata.tenantId != self.management_tenant_id:
+                tenant_cnf_id = self._build_tenant_cnf_id(request.tenantMetadata.tenantId, request.tenantMetadata.tenantFuncName)
+                if tenant_cnf_id in self.switch_configuration["tenant_rules"].keys():
+                    return TIFControlResponse(
+                        status=200,
+                        message="Got Table Entries successfully",
+                        runtimeRules=[ParseDict(rule, RoutingTableConfiguration()) for rule in self.switch_configuration["tenant_rules"][tenant_cnf_id]]
+                    )
+            else:   
+                return TIFControlResponse(
+                    status=200,
+                    message="Got Table Entries successfully",
+                    arpHostEntries=[ParseDict({"key": entry["ip"], "nextHopId": entry["nexthop_id"]}, RoutingTableConfiguration()) for entry in self.switch_configuration["arp_table_host_entries"]],
+                    ipv4HostEntries=[ParseDict({"key": entry["ip"], "nextHopId": entry["nexthop_id"]}, RoutingTableConfiguration()) for entry in self.switch_configuration["ipv4_host_entries"]],
+                    nexthopMapEntries=[ParseDict({"key": key, "nextHopId": value}, RoutingTableConfiguration()) for key, value in self.switch_configuration["nexthop_map"].items()],
+                )
         except Exception as ex:
             self.logger.exception(ex)
             return TIFControlResponse(
@@ -313,32 +365,87 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
             return -1
 
         try:
-            if len(request.arpHostEntries) > 0:
+            tables = {}
+            # The method assumes the checks against access control are done before this point.
+            if request.runtimeRules:
+                if self.switch_configuration["tenant_rules"].get(self._build_tenant_cnf_id(request.tenantMetadata.tenantId, request.tenantMetadata.tenantFuncName)) is None:
+                    self.switch_configuration["tenant_rules"][self._build_tenant_cnf_id(request.tenantMetadata.tenantId, request.tenantMetadata.tenantFuncName)] = []
+                for rule in request.runtimeRules:
+                    rule = MessageToDict(rule)
+                    rule["matches"] = ast.literal_eval(rule["matches"][0])
+                    if isinstance(rule["matches"], str):
+                        rule["matches"] = ast.literal_eval(rule["matches"])
+                    if len(rule["matches"]) != 0:
+                        for key_name, key in rule["matches"].items():
+                            if is_valid_mac(str(key)):
+                                rule["matches"][key_name] = "'{}'".format(key)
+                            elif is_valid_ipv4(str(key)):
+                                rule["matches"][key_name] = "'{}'".format(key)
+                    rule["actionParams"] = ast.literal_eval(rule["actionParams"][0])
+                    if isinstance(rule["actionParams"], str):
+                        rule["actionParams"] = ast.literal_eval(rule["actionParams"])
+                    if len(rule["actionParams"]) != 0:
+                        for key_name, key in rule["actionParams"].items():
+                            if is_valid_mac(str(key)):
+                                rule["actionParams"][key_name] = "'{}'".format(key)
+                            elif is_valid_ipv4(str(key)):
+                                rule["actionParams"][key_name] = "'{}'".format(key)
+                    self.switch_configuration["tenant_rules"][self._build_tenant_cnf_id(request.tenantMetadata.tenantId, request.tenantMetadata.tenantFuncName)].append(rule)
+                    if self.applied_table_entries.get("tenant_rules") is not None:
+                        if rule not in self.applied_table_entries["tenant_rules"]:
+                            tables["tenant_rules"].append(rule)
+                    else:
+                        self.applied_table_entries["tenant_rules"] = []
+                        tables["tenant_rules"] = [rule]
+            if request.arpHostEntries:
                 for entry in request.arpHostEntries:
-                    index = find_ip_in_entries(self.switch_configuration["arp_table_host_entries"].values(), entry.key)
+                    index = find_ip_in_entries(self.switch_configuration["arp_table_host_entries"], entry.key)
                     if index == -1 :
                         self.switch_configuration["arp_table_host_entries"].append({"ip": entry.key, "nexthop_id": entry.nextHopId})
+                        if self.applied_table_entries.get("arp_table_host_entries") is not None:
+                            if {"ip": entry.key, "nexthop_id": entry.nextHopId} not in self.applied_table_entries["arp_table_host_entries"]:
+                                tables["arp_table"].append((f'"{entry.key}"', entry.nextHopId))
+                        else:
+                            tables["arp_table"] = [(f'"{entry.key}"', entry.nextHopId)]
                     else:
                         return TIFControlResponse(
                             status= 400
                         )
-            if len(request.ipv4HostEntries) > 0:
+            if request.ipv4HostEntries:
                 for entry in request.ipv4HostEntries:
-                    index = find_ip_in_entries(self.switch_configuration["ipv4_host_entries"].values(), entry.key)
+                    index = find_ip_in_entries(self.switch_configuration["ipv4_host_entries"], entry.key)
                     if index == -1 :
                         self.switch_configuration["ipv4_host_entries"].append({"ip": entry.key, "nexthop_id": entry.nextHopId})
+                        if self.applied_table_entries.get("ipv4_host_entries") is not None:
+                            if {"ip": entry.key, "nexthop_id": entry.nextHopId} not in self.applied_table_entries["ipv4_host_entries"]:
+                                tables["ipv4_host"].append((f'"{entry.key}"', entry.nextHopId))
+                        else:
+                            tables["ipv4_host"] = [(f'"{entry.key}"', entry.nextHopId)]
                     else:
                         return TIFControlResponse(
                             status= 400
                         )
-            if len(request.nexthopMapEntries) > 0:
+            if request.nexthopMapEntries:
                 for entry in request.nexthopMapEntries:
                     if entry.key not in self.switch_configuration["ipv4_host_entries"]:
                         self.switch_configuration["ipv4_host_entries"][entry.key] = entry.nextHopId
+                        if self.applied_table_entries.get("nexthop_map") is not None:
+                            if entry.key not in self.applied_table_entries["nexthop_map"]:
+                                tables["nexthop"].append((f'"{entry.key}"', entry.nextHopId))
+                        else:
+                            tables["nexthop"] = [(f'"{entry.key}"', entry.nextHopId)]
                     else:
                         return TIFControlResponse(
                             status= 400
                         )
+            bfrt_python_code = self._build_table_entry_bfrt_python_code("add", tables)
+            self.logger.debug("BFRuntime Python Code: {}".format(bfrt_python_code))
+            self._run_bfshell_bfrt_python(bfrt_python_code)
+            if request.runtimeRules:
+                self.applied_table_entries.update({"tenant_rules": {self._build_tenant_cnf_id(request.tenantMetadata.tenantId, request.tenantMetadata.tenantFuncName): tables["tenant_rules"]},}) # Add the applied tenant table entries to the applied table entries list.
+            if "tenant_rules" in tables.keys():
+                tables.pop("tenant_rules")
+            self.applied_table_entries.update(tables) # Add the other applied table entries to the applied table entries list.
             self.save_switch_configuration()
         except Exception as ex:
             self.logger.exception(ex)
@@ -365,6 +472,23 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
         --------
         TIFControlResponse: The response indicating the status of the update operation.
         """
+        def check_if_equal(rule1, rule2):
+            """
+            Check if two rules are equal.
+
+            Parameters:
+            -----------
+            rule1 (dict): 
+                The first rule to compare.
+            rule2 (dict): 
+                The second rule to compare.
+
+            Returns:
+            --------
+            bool: True if the rules are equal, False otherwise.
+            """
+            return rule1["ip"] == rule2["ip"] and rule1["nexthop_id"] == rule2["nexthop_id"]
+        
         def find_ip_in_entries(entry_list, value):
             """
             Finds the index of an IP address in a list of entries.
@@ -385,24 +509,150 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
                     return i
             return -1
 
+        def get_index_of_rule(rule, table):
+            """
+            Get the index of a rule in a table.
+
+            Parameters:
+            -----------
+            rule (dict): 
+                The rule to find.
+            table (list): 
+                The table to search in.
+
+            Returns:
+            --------
+            int: The index of the rule in the table, or -1 if not found.
+            """
+            for i, r in enumerate(table):
+                if r["table"] == rule["table"] and r["matches"] == rule["matches"] :
+                    return i
+            return -1
+
+        def search_rule(rule, table):
+            """
+            Search for a rule in a table.
+
+            Parameters:
+            -----------
+            rule (dict): 
+                The rule to search for.
+            table (list): 
+                The table to search in.
+
+            Returns:
+            --------
+            dict: The rule found in the table, or None if not found.
+            """
+            for r in table:
+                if r["table"] == rule["table"] and r["matches"] == rule["matches"]:
+                    return r
+            return None
+
+        tables = {}
         try:
-            if len(request.arpHostEntries) > 0:
+            if request.runtimeRules:
+                for rule in request.runtimeRules:
+                    rule = MessageToDict(rule)
+                    rule["matches"] = ast.literal_eval(rule["matches"][0])
+                    if isinstance(rule["matches"], str):
+                        rule["matches"] = ast.literal_eval(rule["matches"])
+                    if len(rule["matches"]) != 0:
+                        for key_name, key in rule["matches"].items():
+                            if is_valid_mac(str(key)):
+                                rule["matches"][key_name] = "'{}'".format(key)
+                            elif is_valid_ipv4(str(key)):
+                                rule["matches"][key_name] = "'{}'".format(key)
+                    rule["actionParams"] = ast.literal_eval(rule["actionParams"][0])
+                    if isinstance(rule["actionParams"], str):
+                        rule["actionParams"] = ast.literal_eval(rule["actionParams"])
+                    if len(rule["actionParams"]) != 0:
+                        for key_name, key in rule["actionParams"].items():
+                            if is_valid_mac(str(key)):
+                                rule["actionParams"][key_name] = "'{}'".format(key)
+                            elif is_valid_ipv4(str(key)):
+                                rule["actionParams"][key_name] = "'{}'".format(key)
+                    tenant_cnf_id = self._build_tenant_cnf_id(request.tenantMetadata.tenantId, request.tenantMetadata.tenantFuncName)
+                    if tenant_cnf_id in self.switch_configuration["tenant_rules"].keys():
+                        index = get_index_of_rule(rule, self.switch_configuration["tenant_rules"][tenant_cnf_id])
+                        if index == -1:
+                            return TIFControlResponse(
+                                status= 400,
+                                message="Error while updating table entries: Entry {} in table {} does not exist!".format(rule, "tenant_rules")
+                            )
+                        else:
+                            self.switch_configuration["tenant_rules"][tenant_cnf_id][index] = rule
+                            if self.applied_table_entries.get("tenant_rules") is not None:
+                                if search_rule(rule, self.applied_table_entries["tenant_rules"][tenant_cnf_id]) is not None:
+                                    if tables.get("tenant_rules") is not None:
+                                        tables["tenant_rules"].append(rule)
+                                    else:
+                                        tables["tenant_rules"] = [rule]
+                            else:
+                                tables["tenant_rules"] = [rule]
+            if request.arpHostEntries:
                 for entry in request.arpHostEntries:
-                    index = find_ip_in_entries(self.switch_configuration["arp_table_host_entries"].values(), entry.key)
+                    index = find_ip_in_entries(self.switch_configuration["arp_table_host_entries"], entry.key)
                     if index == -1 :
                         self.switch_configuration["arp_table_host_entries"].append({"ip": entry.key, "nexthop_id": entry.nextHopId})
+                        if self.applied_table_entries.get("arp_table") is not None:
+                            if {"ip": entry.key, "nexthop_id": entry.nextHopId} not in self.applied_table_entries["arp_table"]:
+                                # tables["arp_table"].append((entry.key, entry.nextHopId))
+                                return TIFControlResponse(
+                                    status= 404,
+                                    message="Error while updating table entries: Entry {} in table {} does not exist!".format(entry.key, "arp_table")
+                                )
+                            else: 
+                                tables["arp_table"].append((f'"{entry.key}"', entry.nextHopId))
+                        else:
+                            tables["arp_table"] = [(f'"{entry.key}"', entry.nextHopId)]
                     else:
-                        self.switch_configuration["arp_table_host_entries"][index] = {"ip": entry.key, "nexthop_id": entry.nextHopId}
-            if len(request.ipv4HostEntries) > 0:
+                        if not check_if_equal(self.switch_configuration["arp_table_host_entries"][index], {"ip": entry.key, "nexthop_id": entry.nextHopId}):
+                            self.switch_configuration["arp_table_host_entries"][index] = {"ip": entry.key, "nexthop_id": entry.nextHopId}
+                            if not isinstance(self.applied_table_entries.get("arp_table"), list):
+                                tables["arp_table"] = [(f'"{entry.key}"', entry.nextHopId)]
+                            else:
+                                if "arp_table" not in tables.keys():
+                                    tables["arp_table"] = [(f'"{entry.key}"', entry.nextHopId)]
+                                else:
+                                    tables["arp_table"].append((f'"{entry.key}"', entry.nextHopId))
+            if request.ipv4HostEntries:
                 for entry in request.ipv4HostEntries:
-                    index = find_ip_in_entries(self.switch_configuration["ipv4_host_entries"].values(), entry.key)
+                    index = find_ip_in_entries(self.switch_configuration["ipv4_host_entries"], entry.key)
                     if index == -1 :
-                        self.switch_configuration["ipv4_host_entries"].append({"ip": entry.key, "nexthop_id": entry.nextHopId})
+                        # We can only update existing entries since Tofino support atomic operations!
+                        return TIFControlResponse(
+                            status= 400,
+                            message="Error while updating table entries: Entry {} in table {} does not exist!".format(entry.key, "ipv4_host_entries")
+                        )
                     else:
                         self.switch_configuration["ipv4_host_entries"][index] = {"ip": entry.key, "nexthop_id": entry.nextHopId}
-            if len(request.nexthopMapEntries) > 0:
+                        if not isinstance(self.applied_table_entries.get("ipv4_host_entries"), list):
+                            tables["ipv4_host"] = [(f'"{entry.key}"', entry.nextHopId)]
+                        else:
+                            if "ipv4_host" not in tables.keys():
+                                    tables["ipv4_host"] = [(f'"{entry.key}"', entry.nextHopId)]
+                            else:
+                                tables["ipv4_host"].append((f'"{entry.key}"', entry.nextHopId))
+            if request.nexthopMapEntries:
                 for entry in request.nexthopMapEntries:
                         self.switch_configuration["nexthop_map"][entry.key] = entry.nextHopId
+                        if self.applied_table_entries.get("nexthop_map") is not None:
+                            if entry.key in self.applied_table_entries["nexthop_map"]:
+                                tables["nexthop"].append((f'"{entry.key}"', entry.nextHopId))
+                            else:
+                                return TIFControlResponse(
+                                    status= 400,
+                                    message="Error while updating table entries: Entry {} in table {} does not exist!".format(entry.key, "nexthop_map")
+                                )
+                        else:
+                            if "nexthop" not in tables.keys():
+                                tables["nexthop"] = [(f'"{entry.key}"', entry.nextHopId)]
+                            else:
+                                tables["nexthop"].append((f'"{entry.key}"', entry.nextHopId))
+            bfrt_python_code = self._build_table_entry_bfrt_python_code("update", tables)
+            self._run_bfshell_bfrt_python(bfrt_python_code)
+            self.applied_table_entries.update(tables)
             self.save_switch_configuration()
         except Exception as ex:
             self.logger.exception(ex)
@@ -448,9 +698,69 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
                 if entry["ip"] == value:
                     return i
             return -1
-
+        
         try:
-            if len(request.arpHostEntries) > 0:
+            tables = {}
+            tables["arp_table"] = []
+            tables["ipv4_host"] = []
+            tables["nexthop"] = []
+            tables["tenant_rules"] = []
+            if request.runtimeRules:
+                tables["tenant_rules"] = []
+                for rule in request.runtimeRules:
+                    tenant_cnf_id = self._build_tenant_cnf_id(request.tenantMetadata.tenantId, request.tenantMetadata.tenantFuncName)
+                    rule = MessageToDict(rule)
+                    rule["matches"] = ast.literal_eval(rule["matches"][0])
+                    rule["actionParams"] = ast.literal_eval(rule["actionParams"][0])
+                    if isinstance(rule["matches"], str):
+                        rule["matches"] = ast.literal_eval(rule["matches"])
+                    if isinstance(rule["actionParams"], str):
+                        rule["actionParams"] = ast.literal_eval(rule["actionParams"])
+                    if len(rule["matches"]) != 0:
+                        for key_name, key in rule["matches"].items():
+                            if is_valid_mac(str(key)):
+                                rule["matches"][key_name] = "'{}'".format(key)
+                            elif is_valid_ipv4(str(key)):
+                                rule["matches"][key_name] = "'{}'".format(key)
+                    rule["actionParams"] = ast.literal_eval(rule["actionParams"][0])
+                    if len(rule["actionParams"]) != 0:
+                        for key_name, key in rule["actionParams"].items():
+                            if is_valid_mac(str(key)):
+                                rule["actionParams"][key_name] = "'{}'".format(key)
+                            elif is_valid_ipv4(str(key)):
+                                rule["actionParams"][key_name] = "'{}'".format(key)
+                    if tenant_cnf_id in self.switch_configuration["tenant_rules"].keys():
+                        index = self.switch_configuration["tenant_rules"][tenant_cnf_id].index(rule)
+                        if index == -1:
+                            return TIFControlResponse(
+                                status = 404,
+                                message="Error while deleting table entries: Entry {} in table {} does not exist!".format(rule, "tenant_rules")
+                            )
+                        else:
+                            rule = self.switch_configuration["tenant_rules"][tenant_cnf_id].pop(index)
+                            if len(self.switch_configuration["tenant_rules"][tenant_cnf_id]) == 0:
+                                del self.switch_configuration["tenant_rules"][tenant_cnf_id]
+                            if self.applied_table_entries.get("tenant_rules") is not None:
+                                if rule in self.applied_table_entries["tenant_rules"]:
+                                    index = self.applied_table_entries["tenant_rules"][tenant_cnf_id].index(rule)
+                                    if index != -1:
+                                        tables["tenant_rules"].append(rule)
+                                    else:
+                                        return TIFControlResponse(
+                                            status = 404,
+                                            message="Error while deleting table entries: Entry {} in table {} does not exist!".format(rule, "tenant_rules")
+                                        )
+                                else:
+                                    return TIFControlResponse(
+                                            status = 404,
+                                            message="Error while deleting table entries: Entry {} in table {} does not exist!".format(rule, "tenant_rules")
+                                        )
+                    else:
+                        return TIFControlResponse(
+                            status = 404,
+                            message="Error while deleting table entries: Entry {} in table {} does not exist!".format(rule, "tenant_rules")
+                        )
+            if request.arpHostEntries:
                 for entry in request.arpHostEntries:
                     index = find_ip_in_entries(self.switch_configuration["arp_table_host_entries"], entry.key)
                     if index == -1 :
@@ -458,8 +768,15 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
                             status = 404
                         )
                     else:
-                        self.switch_configuration["arp_table_host_entries"].pop(index)
-            if len(request.ipv4HostEntries) > 0:
+                        rule = self.switch_configuration["arp_table_host_entries"].pop(index)
+                        if self.applied_table_entries.get("arp_table") is not None:
+                            if rule in self.applied_table_entries["arp_table"]:
+                                tables["arp_table"].append((f'"{rule["ip"]}"', rule["nexthop_id"]))
+                            else:
+                                return TIFControlResponse(
+                                    status = 404
+                                )
+            if request.ipv4HostEntries:
                 for entry in request.ipv4HostEntries:
                     index = find_ip_in_entries(self.switch_configuration["ipv4_host_entries"], entry.key)
                     if index == -1 :
@@ -467,11 +784,18 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
                             status = 404
                         )
                     else:
-                        self.switch_configuration["ipv4_host_entries"].pop(index)
-            if len(request.nexthopMapEntries) > 0:
+                        rule = self.switch_configuration["ipv4_host_entries"].pop(index)
+                        if self.applied_table_entries.get("ipv4_host") is not None:
+                            if rule not in self.applied_table_entries["ipv4_host"]:
+                                tables["ipv4_host"].append((f'"{rule["ip"]}"', rule["nexthop_id"]))
+            if request.nexthopMapEntries:
                 for entry in request.nexthopMapEntries:
                         self.switch_configuration["nexthop_map"].pop(entry.key)
-
+                        if self.applied_table_entries.get("nexthop") is not None:
+                            if entry.key not in self.applied_table_entries["nexthop"]:
+                                tables["nexthop"].append(entry.key)
+            bfrt_python_code = self._build_table_entry_bfrt_python_code("delete", tables)
+            self._run_bfshell_bfrt_python(bfrt_python_code)
             self.save_switch_configuration()
         except Exception as ex:
             self.logger.exception(ex)
@@ -483,7 +807,6 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
             status =  200,
         )
     
-
     def GetLAGConfiguration(self, request : TIFControlRequest, context):
         """
         Retrieves the LAG (Link Aggregation Group) configuration.
@@ -939,6 +1262,46 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
                 if lag_metadata["id"] == lag_id:
                     return lag_name
 
+    def _apply_known_table_rules(self):
+        """
+        Apply the known table rules to the switch.
+
+        Parameters:
+        ----------
+        None
+
+        Returns:
+        --------
+        None
+        """
+        bfrt_python_code = ""
+        if self.applied_table_entries.get("tenant_rules") is not None:
+            bfrt_python_code += self._build_table_entry_bfrt_python_code("add", {"tenant_rules": self.applied_table_entries["tenant_rules"]}) + "\n"
+        if self.applied_table_entries.get("arp_table_host_entries") is not None:
+            bfrt_python_code += self._build_table_entry_bfrt_python_code("add", {"arp_table_host_entries": self.applied_table_entries["arp_table_host_entries"]}) + "\n"
+        if self.applied_table_entries.get("ipv4_host_entries") is not None:
+            bfrt_python_code += self._build_table_entry_bfrt_python_code("add", {"ipv4_host_entries": self.applied_table_entries["ipv4_host_entries"]}) + "\n"
+        if self.applied_table_entries.get("nexthop_map") is not None:
+            bfrt_python_code += self._build_table_entry_bfrt_python_code("add", {"nexthop_map": self.applied_table_entries["nexthop_map"]}) + "\n"
+        
+        self._run_bfshell_bfrt_python(bfrt_python_code)
+
+    def _apply_known_tenant_table_rules(self):
+        # Flatten applied_table_entries dictionary by removing the tenant_cnf_id key
+        tables = {}
+        for table_category, tenant_tables in self.applied_table_entries.items():
+            if isinstance(tenant_tables, dict):
+                for tenant_cnf_id, tenant_table in tenant_tables.items():
+                    if tables.get(table_category) is not None:
+                        tables[table_category].extend(tenant_table)
+                    else:
+                        tables[table_category] = tenant_table
+            else:
+                tables[table_category] = tenant_tables
+        code = self._build_table_entry_bfrt_python_code("add", tables)
+        self.logger.debug(code)
+        self._run_bfshell_bfrt_python(code)
+
     def _run_tif_initialization_setup_script(self):
         """
         Runs the TIF initialization setup script.
@@ -966,9 +1329,13 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
             )
             self.logger.debug(code)
             self._run_bfshell_bfrt_python(code)
+            self._apply_known_tenant_table_rules()
+            self.logger.info("TIF initialization setup successful.")
         else:
-            self.logger.warning("Initialization of TIF on center Tofino devices is not implemented at the moment!")
-            
+            # self.logger.warning("Initialization of TIF on center Tofino devices is not implemented at the moment!")
+            self._apply_known_tenant_table_rules()
+            self.logger.info("TIF initialization setup successful.")
+
     def _run_restart_port_setup(self):
         """
         Run the restart port setup process.
@@ -1121,6 +1488,47 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
             #     message=""
             # )
 
+    def _build_table_entry_bfrt_python_code(self, operation, tables):
+        """
+        Build the BFRuntime Python code for a table entry.
+
+        Parameters:
+        ----------
+        table_name (str): 
+            The name of the table.
+        table_entry (dict): 
+            The table entry data.
+
+        Returns:
+        --------
+        str: The generated BFRuntime Python code.
+        """
+        environment = jinja2.Environment(loader=jinja2.FileSystemLoader(Path(self.bfrt_templates_location + "/")))
+        template = environment.get_template("{:s}_table_entry.py.j2".format(operation))
+        return template.render(tables=tables)
+
+    def pull_table_entries_from_tofino(self, tables):
+        """
+        Pull table entries from the Tofino chip.
+
+        Parameters:
+        ----------
+        tables (list): 
+            The list of tables for which the entries should be pulled.
+
+        Returns:
+        --------
+        dict: The table entries.
+        """
+        with grpc.insecure_channel(self.tofino_grpc_address) as channel:
+            stub = bfruntime_pb2_grpc.BfRuntimeStub(channel)
+            for table in tables:
+                request = bfruntime_pb2.ReadTableEntriesRequest()
+                request.table_name = table
+                response = stub.ReadTableEntries(request)
+                yield response
+
+
     def pull_ForwardingPipelineConfig_from_tofino(self, address=None):
             """
             Pull the running Forwarding Pipeline Config from the tofino chip 
@@ -1138,7 +1546,11 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
             """
             if address is None:
                 address = self.tofino_grpc_address
-            with grpc.insecure_channel(address) as channel:
+            with grpc.insecure_channel(address, options=[
+                    ('grpc.max_send_message_length', maxMsgLength),
+                    ('grpc.max_receive_message_length', maxMsgLength),
+                    ('grpc.max_message_length', maxMsgLength)
+                ]) as channel:
                 stub = bfruntime_pb2_grpc.BfRuntimeStub(channel)
                 resp : bfruntime_pb2.GetForwardingPipelineConfigResponse = stub.GetForwardingPipelineConfig(bfruntime_pb2.GetForwardingPipelineConfigRequest())
                 resp_dict = MessageToDict(resp)

@@ -16,44 +16,19 @@ parser TenantINCFrameworkIngressParser(packet_in packet,
         transition parse_ethernet;
     }
 
-    // state init_metadata {
-    //     meta.packet_length = packet.length();
-    //     meta.flow_type = flow_type;
-    //     meta.flow_export_reason = 0;
-    //     meta.flow_hash = 0;
-    //     meta.tenant_meta.tenant_id = 0;
-    //     meta.tenant_meta.tenant_func_id = 0;
-    //     meta.tenant_meta.export_flag = 0;
-    //     meta.l4_meta.src_port = 0;
-    //     meta.l4_meta.dst_port = 0;
-    //     meta.ingress_meta.flow_hash_collision = 0;
-    //     // meta.feature_meta.probability = 0;
-    //     // meta.feature_meta.class = 0;        
-    //     // meta.feature_meta.tree_count = 0;
-    //     // meta.feature_meta.flow_packet_inter_arrival_time_min = 0;
-    //     // meta.feature_meta.flow_packet_inter_arrival_time_max = 0;
-    //     // meta.feature_meta.flow_packet_inter_arrival_time_mean = 0;
-    //     // meta.feature_meta.bidirectional_packets = 0;
-    //     // meta.feature_meta.bidirectional_bytes = 0;
-    //     // meta.feature_meta.flow_packet_length_min = 0;
-    //     // meta.feature_meta.flow_packet_length_max = 0;
-    //     // meta.feature_meta.flow_packet_length_mean = 0;
-    //     // // meta.feature_meta.flow_avg_num_packets = 0;
-    //     // meta.feature_meta.malware = 0;
-
-    //     transition parse_ethernet;
-    // }
-
     state parse_ethernet {
         packet.extract(hdr.ethernet);
 
         transition select(hdr.ethernet.ether_type) {
             ether_types_t.IPV4: parse_ipv4;
-            // ether_types_t.FLOW_MONITORING:  parse_flow_monitoring;
-            // ether_types_t.FLOW_EXPORT_REQUEST: parse_flow_export_request;
-            // ether_types_t.FLOW_EXPORT_RESPONSE: parse_flow_export_response;
+            ether_types_t.ARP: parse_arp;
             default: accept;    // reject;
         }
+    }
+
+    state parse_arp {
+        packet.extract(hdr.arp);
+        transition accept;
     }
 
     state parse_ipv4 {
@@ -91,6 +66,11 @@ parser TenantINCFrameworkIngressParser(packet_in packet,
 
     state parse_icmp {
         packet.extract(hdr.icmp);
+        transition parse_icmp_options;
+    }
+
+    state parse_icmp_options {
+        packet.extract(hdr.icmp_options);
         transition accept;
     }
     
@@ -130,8 +110,14 @@ parser TenantINCFrameworkIngressParser(packet_in packet,
         packet.extract(hdr.inner_ethernet);
         transition select(hdr.inner_ethernet.ether_type) {
             ether_types_t.IPV4: parse_inner_ipv4;
+            ether_types_t.ARP: parse_inner_arp;
             default: accept;
         }
+    }
+
+     state parse_inner_arp {
+        packet.extract(hdr.inner_arp);
+        transition accept;
     }
 
     state parse_inner_ipv4 {
@@ -159,7 +145,6 @@ parser TenantINCFrameworkIngressParser(packet_in packet,
 
     state parse_inner_tcp {
         packet.extract(hdr.inner_tcp);
-        // log_msg("Parse TCP: ");
         meta.l4_meta.src_port = hdr.inner_tcp.src_port;
         meta.l4_meta.dst_port = hdr.inner_tcp.dst_port;
 
@@ -175,7 +160,6 @@ parser TenantINCFrameworkIngressParser(packet_in packet,
 
     state parse_inner_udp {
         packet.extract(hdr.inner_udp);
-        // log_msg("Parse UDP: ");
         meta.l4_meta.src_port = hdr.inner_udp.src_port;
         meta.l4_meta.dst_port = hdr.inner_udp.dst_port;
 
@@ -184,29 +168,14 @@ parser TenantINCFrameworkIngressParser(packet_in packet,
 
     state parse_inner_icmp {
         packet.extract(hdr.inner_icmp);
+        transition parse_inner_icmp_options;
+    }
+
+    state parse_inner_icmp_options {
+        packet.extract(hdr.inner_icmp_options);
         transition accept;
     }
 
-//     state parse_flow_monitoring {
-//         packet.extract(hdr.flow_mon);
-//         transition accept;
-//     }
-
-//     state parse_flow_export_request {
-//         packet.extract(hdr.flow_export_request);
-//         transition accept;
-//     }
-
-//     state parse_flow_export_response {
-// #if (defined(FLOW_TYPE_FLOWS) || defined(FLOW_TYPE_SUBFLOWS))
-//         packet.extract(hdr.flow_record_data);
-// #endif  // (defined(FLOW_TYPE_FLOWS) || defined(FLOW_TYPE_SUBFLOWS))
-// #if (defined(FLOW_TYPE_BIFLOWS) || defined(FLOW_TYPE_BISUBFLOWS))
-//         packet.extract(hdr.biflow_record_data);
-// #endif  // (defined(FLOW_TYPE_BIFLOWS) || defined(FLOW_TYPE_BISUBFLOWS))
-
-//         transition accept;
-//     }
 }
 
 /*************************************************************************
@@ -215,32 +184,50 @@ parser TenantINCFrameworkIngressParser(packet_in packet,
 control TenantINCFrameworkIngressDeparser(packet_out packet,
                                inout headers_t hdr, 
                                in metadata_t meta) {
+    Checksum() icmp_csum;
+        
     apply {
+        if (hdr.inner_icmp.isValid()) {
+            if (hdr.inner_icmp_options.isValid()) {
+                hdr.inner_icmp.checksum = icmp_csum.update({
+                    hdr.inner_icmp.type, 
+                    hdr.inner_icmp.code,
+                    // hdr.inner_icmp.checksum, 
+                    hdr.inner_icmp.identifier,
+                    hdr.inner_icmp.sequence_number,
+                    hdr.inner_icmp.timestamp,
+                    hdr.inner_icmp_options.options
+                    });
+            } else {
+                hdr.inner_icmp.checksum = icmp_csum.update({
+                    hdr.inner_icmp.type, 
+                    hdr.inner_icmp.code,
+                    // hdr.inner_icmp.checksum, 
+                    hdr.inner_icmp.identifier,
+                    hdr.inner_icmp.sequence_number,
+                    hdr.inner_icmp.timestamp,
+                    (bit<320>) 0
+                    });
+            }
+        }
+        
         packet.emit(hdr.ethernet);
+        packet.emit(hdr.arp);
         packet.emit(hdr.ipv4);
         packet.emit(hdr.icmp);
+        packet.emit(hdr.icmp_options);
         packet.emit(hdr.tcp);
         packet.emit(hdr.tcp_options);
         packet.emit(hdr.udp);
         packet.emit(hdr.vxlan);
         packet.emit(hdr.inner_ethernet);
+        packet.emit(hdr.inner_arp);
         packet.emit(hdr.inner_ipv4);
         packet.emit(hdr.inner_icmp);
+        packet.emit(hdr.inner_icmp_options);
         packet.emit(hdr.inner_tcp);
         packet.emit(hdr.inner_tcp_options);
         packet.emit(hdr.inner_udp);
-//         // packet.emit(hdr.pm);
-//         packet.emit(hdr.flow_mon);
-//         packet.emit(hdr.tenant);
-//         packet.emit(hdr.flow_export_request);
-//         packet.emit(hdr.flow_export_response);
-// #if (defined(FLOW_TYPE_FLOWS) || defined(FLOW_TYPE_SUBFLOWS))
-//         packet.emit(hdr.flow_record_data);
-// #endif  // (defined(FLOW_TYPE_FLOWS) || defined(FLOW_TYPE_SUBFLOWS))
-// #if (defined(FLOW_TYPE_BIFLOWS) || defined(FLOW_TYPE_BISUBFLOWS))
-//         packet.emit(hdr.biflow_record_data);
-// #endif  // (defined(FLOW_TYPE_BIFLOWS) || defined(FLOW_TYPE_BISUBFLOWS))
-//         packet.emit(hdr.analyzer);
     }
 }
 

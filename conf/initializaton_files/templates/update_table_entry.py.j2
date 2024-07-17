@@ -1,0 +1,26 @@
+p4 = bfrt.tenant_inc.pipe
+main_ingress = p4.TenantINCFrameworkIngress
+{% for table_name, table_entries in tables.items() %}
+{% if table_name != "tenant_rules" %}
+table = main_ingress.{{ table_name }}
+{% if table_name == "nexthop" %}
+{% for entry in table_entries %}
+table.entry({{ entry["nexthop_id"] }}, SELECTOR_GROUP_ID={{ entry["SELECTOR_GROUP_ID"] }}).push()
+{% endfor %}
+{% elif table_name == "ipv4_host" or table_name == "ipv4_lpm" or table_name == "arp_table" %}
+{% for entry in table_entries %}
+table.mod_with_set_nexthop({{ entry[0] }}, {{ entry[1] }})
+{% endfor %}
+{% else %}
+{% for entry in table_entries %}
+table.mod_with_{{ entry["actionName"] }}({{ entry["matches"].values() | join(', ')}}, {{ entry["actionParams"].values() | join(', ')}})
+{% endfor %}
+{% endif %}
+{% endif %}
+{% endfor %}
+
+{% for entry in tables["tenant_rules"] %}
+table = main_ingress.{{ entry["table"] }}
+table.mod_with_{{ entry["actionName"] }}({{ entry["matches"].values() | join(', ')}}, {{ entry["actionParams"].values() | join(', ')}})
+# table.dump()
+{% endfor %}

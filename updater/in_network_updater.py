@@ -21,7 +21,7 @@ from orchestrator_utils.til.orchestrator_msg_pb2 import UPDATE_ACTION_CREATE, UP
 from orchestrator_utils.til.orchestrator_msg_pb2_grpc import INUpdaterCommunicatorServicer
 from orchestrator_utils.til.til_msg_pb2 import TenantMetadata, TenantFuncDescription
 
-from conf.grpc_settings import INUPDATER_ADDRESS, TIF_ADDRESS
+from conf.grpc_settings import INUPDATER_ADDRESS, RULESUPDATER_ADDRESS, TIF_ADDRESS, maxMsgLength
 from conf.in_updater_settings import ACCELERATOR_CONFIGURATION, DevInitModes
 from conf.time_measurement_settings import CURRENT_TIMEMEASUREMENT_TIMESCALE
 from updater.accelerator.accelerator import Accelerator, AcceleratorCompilerException, BMv2, acceleratorClasses
@@ -68,6 +68,8 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
         self.accelerator_compilers = {}
         self.tenant_cnf_accelerator_map = {}
         self.old_tenant_cnf_accelerator_map = {}
+        self.rules_to_apply = {}
+        self.rules_to_delete = {}
         for accelerator in AcceleratorType:
             if accelerator == AcceleratorType.NONE:
                 continue
@@ -92,7 +94,7 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
                 else:
                     self.accelerator_compilers.update({accelerator.value: acceleratorClasses[accelerator.value]("inc_template/{}/".format(ACCELERATOR_CONFIGURATION[accelerator.value]["template"].value), dev_init_mode)})
                 
-                self.otf_generators.update({accelerator.value: OTFGenerator("inc_template/{}/".format(accelerator.value), "inc_template/{}/".format(accelerator.value), self.accelerator_compilers[accelerator.value].otf_apply_parameter)})
+                self.otf_generators.update({accelerator.value: OTFGenerator("inc_template/{}/".format(ACCELERATOR_CONFIGURATION[accelerator.value]["template"].value), "inc_template/{}/".format(ACCELERATOR_CONFIGURATION[accelerator.value]["template"].value), self.accelerator_compilers[accelerator.value].otf_apply_parameter)})
         
                 for name, tenant_code_defintion in self.tenants_code_definitions[accelerator.value].items():
                     if name != "general":
@@ -110,6 +112,12 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
     @staticmethod
     def _build_tenant_cnf_id(tenantId, tenantFuncName):
         return "t" + str(tenantId) + "-" + tenantFuncName
+    
+    @staticmethod
+    def split_tenant_cnf_id(tenant_cnf_id):
+        tenant_id = tenant_cnf_id.split("-")[0][1:]
+        tenant_func_name = tenant_cnf_id.split("-")[1]
+        return int(tenant_id), tenant_func_name
 
     def _create_tenant_definition(self, tenantId, tenantFuncName, hash_compiled_code = None, compiled_code = "", compiled_p4runtime_code= "", hash_compiled_p4runtime_code = None, code = "", status = UPDATE_STATUS_UPDATING, mainIngressName: str = "", accessRules: list = [], acceleratorType = ACCELERATOR_TYPE_UNSPECIFIED, updateAction = UPDATE_ACTION_CREATE):
         """
@@ -215,7 +223,11 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
             acc_type_num = find_protobuf_acceleratorTypeEnum(accelerator_name)
             resp_dict = None
             code_parts = None
-            with grpc.insecure_channel(TIF_ADDRESS) as channel:
+            with grpc.insecure_channel(TIF_ADDRESS, options=[
+        ('grpc.max_send_message_length', maxMsgLength),
+        ('grpc.max_receive_message_length', maxMsgLength),
+        ('grpc.max_message_length', maxMsgLength)
+    ]) as channel:
                 inc_updater_stub = orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorStub(channel)
                 resp : orchestrator_msg_pb2.TIFResponse = inc_updater_stub.GetTIFCode(
                     orchestrator_msg_pb2.TIFRequest(
@@ -245,6 +257,11 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
                         tenantFuncName=tenant["tenantFuncName"]), 
                     tenantFuncId=tenant["tenant_func_id_num"]) 
                     for key, tenant in self.tenants_code_definitions[accelerator_name].items() if key != "general"]
+                # The rules of the tenant functions that will be deleted must be deleted first!
+                for tenant_cnf_id, runtime_rules in self.rules_to_delete.items():
+                    self._delete_rules(tenant_cnf_id, runtime_rules)
+                self.rules_to_delete.clear()
+                # Apply the new code to the accelerator
                 with grpc.insecure_channel(TIF_ADDRESS) as channel:
                     tif_update_init_start = time.time()
                     tif_updater_stub = orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorStub(channel)
@@ -336,10 +353,12 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
                 raise UpdateException(message)
             if inTConfig.updateAction == UPDATE_ACTION_CREATE:
                 self.otf_generators[acceleratorType.value].add_otf_by_code(tenant_cnf_id, self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["tenant_func_id_num"], accessRules, mainIngressName, p4Code)
+                self.rules_to_apply[tenant_cnf_id] = [MessageToDict(rule) for rule in inTConfig.runtimeRules]
             elif inTConfig.updateAction == UPDATE_ACTION_UPDATE:
                 try: 
                     self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["status"] = UPDATE_STATUS_UPDATING
                     self.otf_generators[acceleratorType.value].update_otf_by_code(tenant_cnf_id, self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["tenant_func_id_num"], accessRules, mainIngressName, p4Code)
+                    self.rules_to_apply[tenant_cnf_id] = [MessageToDict(rule) for rule in inTConfig.runtimeRules]
                 except KeyError as err:
                     self.logger.warning("Tenant CNF ID not found! Creating OTF part.")
                     self.otf_generators[acceleratorType.value].add_otf_by_code(tenant_cnf_id, self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["tenant_func_id_num"], accessRules, mainIngressName, p4Code)
@@ -347,6 +366,7 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
                 self.otf_generators[acceleratorType.value].delete_otf(tenant_cnf_id)
                 # Keep the mapping for the status access.
                 self.old_tenant_cnf_accelerator_map[tenant_cnf_id] = self.tenant_cnf_accelerator_map.pop(tenant_cnf_id)
+                self.rules_to_delete[tenant_cnf_id] = [MessageToDict(rule) for rule in inTConfig.runtimeRules]
             else:
                 raise UpdateException("Update Action was unspecified or not recognized!") 
         for name, otf_generator in self.otf_generators.items():
@@ -354,9 +374,179 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
 
     def _postprocess(self):
         """
-        Helper method to postprocess the deployment in general. At the moment is nothing to do here.
+        Helper method to postprocess the deployment in general.
         """
-        pass
+        try:
+            for tenant_cnf_id, runtime_rules in self.rules_to_apply.items():
+                self._synchronize_rules(tenant_cnf_id, runtime_rules)
+            self.rules_to_apply.clear()
+        except Exception as ex:
+            self.logger.exception(ex, exc_info=True)
+            # raise UpdateException("Error while postprocessing: {}".format(str(ex)))
+
+    def _delete_rules(self, tenant_cnf_id, runtime_rules):
+        """
+        Helper method to delete the rules for a given tenant configuration ID.
+
+        Parameters:
+        -----------
+        tenant_cnf_id : str
+            Tenant configuration ID
+        runtime_rules : list
+            List of runtime rules which should be deleted
+        """
+        tenant_id, tenant_func_name = self.split_tenant_cnf_id(tenant_cnf_id)
+        try:
+            with grpc.insecure_channel(RULESUPDATER_ADDRESS) as channel:
+                rule_updater_stub = orchestrator_msg_pb2_grpc.RulesUpdaterCommunicatorStub(channel)
+                resp : orchestrator_msg_pb2.TIFControlResponse = rule_updater_stub.DeleteRules(
+                    orchestrator_msg_pb2.TIFControlRequest(
+                        tenantMetadata = til_msg_pb2.TenantMetadata(
+                            tenantId = tenant_id,
+                            tenantFuncName = tenant_func_name
+                        ),
+                        runtimeRules = runtime_rules
+                    )
+                )
+                if resp.status == 200:
+                    resp : orchestrator_msg_pb2.TIFControlResponse = rule_updater_stub.GetRules(
+                        orchestrator_msg_pb2.TIFControlRequest(
+                            tenantMetadata = til_msg_pb2.TenantMetadata(
+                                tenantId = tenant_id,
+                                tenantFuncName = tenant_func_name
+                            )
+                        )
+                    )
+                    if resp.status == 404:
+                        self.logger.info("Rules for {} deleted successfully!".format(tenant_cnf_id))
+                    else:
+                        raise UpdateException("Error while deleting rules: {}".format(resp.message))
+                else:
+                    raise UpdateException("Error while deleting rules: {} (status: {})".format(resp.message, resp.status))
+        except Exception as ex:
+            self.logger.exception(ex, exc_info=True)
+            # raise UpdateException("Error while deleting rules: {}".format(str(ex)))
+
+    def _synchronize_rules(self, tenant_cnf_id, runtime_rules):
+        """
+        Helper method to synchronize the rules for a given tenant configuration ID.
+
+        Parameters:
+        -----------
+        tenant_cnf_id : str
+            Tenant configuration ID
+        runtime_rules : list
+            List of runtime rules which should be synchronized
+        """
+        def equal_complete_rule_dict(rules1 : list, rules2 : list):
+            """
+            Check if two rule dictionaries are equal.
+            """
+            for rule1 in rules1:
+                if not complete_rule_in_runtime_rules(rule1, rules2):
+                    return False
+            return True
+        
+        def complete_rule_in_runtime_rules(rule : dict, runtime_rules : list):
+            """
+            Check if a rule is in the runtime rules.
+            """
+            for runtime_rule in runtime_rules:
+                if equals_complete_rule(rule, runtime_rule):
+                    return True
+            return False
+        
+        def rule_in_runtime_rules(rule : dict, runtime_rules : list):
+            """
+            Check if a rule is in the runtime rules.
+            """
+            for runtime_rule in runtime_rules:
+                if equals_rule(rule, runtime_rule):
+                    return True
+            return False
+        
+        def equals_complete_rule(rule : dict, runtime_rule : dict):
+            """
+            A rule must have the same table, matches and action to be the same.
+            """
+            return rule["table"] == runtime_rule["table"] and rule["matches"] == runtime_rule["matches"] and rule["actionName"] == runtime_rule["actionName"] and rule["actionParams"] == runtime_rule["actionParams"]
+
+        def equals_rule(rule : dict, runtime_rule : dict):
+            """
+            A rule must have the same table and matches to be the same.
+            """
+            return rule["table"] == runtime_rule["table"] and rule["matches"] == runtime_rule["matches"]
+
+        scheduled_create_rules = []
+        scheduled_delete_rules = []
+        scheduled_update_rules = []
+        tenant_id, tenant_func_name = self.split_tenant_cnf_id(tenant_cnf_id)
+        try:
+            with grpc.insecure_channel(RULESUPDATER_ADDRESS) as channel:
+                rule_updater_stub = orchestrator_msg_pb2_grpc.RulesUpdaterCommunicatorStub(channel)
+                resp : orchestrator_msg_pb2.TIFControlResponse = rule_updater_stub.GetRules(
+                    orchestrator_msg_pb2.TIFControlRequest(
+                        tenantMetadata = til_msg_pb2.TenantMetadata(
+                            tenantId = tenant_id,
+                            tenantFuncName = tenant_func_name
+                        )
+                    )
+                )
+                if resp.status == 200:
+                    # Check if the rules are the same
+                    applied_runtime_rules = [MessageToDict(rule) for rule in resp.runtimeRules]
+                    if equal_complete_rule_dict(runtime_rules, applied_runtime_rules):
+                        return
+                    else:
+                        # Check which rules are different and create/delete them
+                        for rule in runtime_rules:
+                            if not rule_in_runtime_rules(rule, applied_runtime_rules):
+                                scheduled_create_rules.append(rule)
+                            else:
+                                scheduled_update_rules.append(rule)
+                        for rule in applied_runtime_rules:
+                            if not rule_in_runtime_rules(rule, runtime_rules):
+                                scheduled_delete_rules.append(rule)
+                            elif rule not in scheduled_update_rules:
+                                # scheduled_update_rules.append(rule)
+                                pass
+                            else:
+                                scheduled_create_rules.append(rule)
+                elif resp.status == 404:
+                    scheduled_create_rules = runtime_rules
+                if len(scheduled_update_rules) > 0:
+                    resp : orchestrator_msg_pb2.TIFControlResponse = rule_updater_stub.UpdateRules(
+                        orchestrator_msg_pb2.TIFControlRequest(
+                            tenantMetadata = til_msg_pb2.TenantMetadata(
+                                tenantId = tenant_id,
+                                tenantFuncName = tenant_func_name
+                            ),
+                        runtimeRules = [ParseDict(rule, til_msg_pb2.RuntimeRule()) for rule in scheduled_update_rules]
+                        )
+                    )
+                if len(scheduled_create_rules) > 0:
+                    resp : orchestrator_msg_pb2.TIFControlResponse = rule_updater_stub.CreateRules(
+                        orchestrator_msg_pb2.TIFControlRequest(
+                            tenantMetadata = til_msg_pb2.TenantMetadata(
+                                tenantId = tenant_id,
+                                tenantFuncName = tenant_func_name
+                            ),
+                            runtimeRules = [ParseDict(rule, til_msg_pb2.RuntimeRule()) for rule in scheduled_create_rules]
+                        )
+                    )
+                if len(scheduled_delete_rules) > 0:
+                    resp : orchestrator_msg_pb2.TIFControlResponse = rule_updater_stub.DeleteRules(
+                        orchestrator_msg_pb2.TIFControlRequest(
+                            tenantMetadata = til_msg_pb2.TenantMetadata(
+                                tenantId = tenant_id,
+                                tenantFuncName = tenant_func_name
+                            ),
+                            runtimeRules = [ParseDict(rule, til_msg_pb2.RuntimeRule()) for rule in scheduled_delete_rules]
+                        )
+                    )
+        except Exception as ex:
+            self.logger.exception(ex, exc_info=True)
+            # raise UpdateException("Error while synchronizing rules: {}".format(str(ex)))
 
     def _build_inupdate_time_measurement_message(self, preprocessTime, compileTime, updateTime, postProcessTime):
         """
@@ -524,6 +714,19 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
                                 self.otf_generators[accelerator.value].delete_otf(key)
                     except KeyError as err:
                         self.logger.error("{} in {} does not exist!".format(key, accelerator.value))
+                # Cleanup of all applied tenant_rules
+                try:
+                    with grpc.insecure_channel(RULESUPDATER_ADDRESS) as channel:
+                        rule_updater_stub = orchestrator_msg_pb2_grpc.RulesUpdaterCommunicatorStub(channel)
+                        resp : orchestrator_msg_pb2.TIFControlResponse = rule_updater_stub.Cleanup(
+                            orchestrator_msg_pb2.TIFControlRequest()
+                        )
+                        if resp.status == 200:
+                            self.logger.info("Cleanup of {} rules was successful.".format(accelerator.value))
+                        else:
+                            raise Exception("Custom error while cleaning up rules")
+                except Exception as ex:
+                    self.logger.exception(ex, exc_info=True)
                 # Call update once to reset the applied in-network
                 with grpc.insecure_channel(INUPDATER_ADDRESS) as channel:
                     stub = orchestrator_msg_pb2_grpc.INUpdaterCommunicatorStub(channel)

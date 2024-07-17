@@ -1,7 +1,7 @@
 # OMuProCU Core
 
 This repository contains the core framework of the paper [`Low Impact Tenant Code Updates on Multi-tenant Programmable Switches`](https://ieeexplore.ieee.org/abstract/document/10327866) where the first version was presented.
-Meanwhile, an extended version of the core framework is added used in the paper `Orchestrating Multi-Tenant Code Updates Across Multiple Programmable Switches`.
+Meanwhile, extended versions of the core framework are added used in the paper [`Orchestrating Multi-Tenant Code Updates Across Multiple Programmable Switches`](https://ieeexplore.ieee.org/document/10575368) and `Resilient Multi-Tenant Code Updates for Adaptive Network State Changes`.
 
 As interface to use the Tofino 1 chip, the proposed [Open-Tofino Code](https://github.com/barefootnetworks/Open-Tofino) is used. 
 
@@ -32,7 +32,7 @@ Then, you need to install the python packages needed in this repository:
 pip3 install -r requirements.txt
 ```
 
-Also, you need to build and install **OMuProCU-utils** pip packages. 
+Also, you need to build and install [**OMuProCU-utils**](https://github.com/tiritor/OMuProCU-utils) pip packages. 
 
 ```
 cd ../OMuProCU_utils
@@ -70,7 +70,7 @@ Also, there are some modules which are used from the [OMuProCU-utils](https://gi
 
 - Validator
 - Persistor
-- Tenant Communcation Controller
+- Tenant Communication Controller
 - Protobuf Message Descriptions and its GRPC interfaces
 
 ### Management
@@ -108,6 +108,12 @@ Due to license of some used APIs (e.g., proprietary SAL for Hardware initializat
 #### BMv2
 
 If you want to use BMv2, this must be built with GRPC support.
+
+### Rules Updater
+
+As new component of the paper `Resilient Multi-Tenant Code Updates for Adaptive Network State Changes`, a rules updater is introduced which can add/update/delete rules for provider tables as well as tenant tables.
+
+The communication is done via GRPC. The [MOC Shell](https://github.com/tiritor/MD-OMuProCU) in the [MD-OMuProCU](https://github.com/tiritor/MD-OMuProCU) repository can be used to use it. 
 
 
 ## Configuration 

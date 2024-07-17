@@ -30,6 +30,7 @@ from conf.time_measurement_settings import CURRENT_TIMEMEASUREMENT_TIMESCALE
 from reconfig_scheduler import ReconfigScheduler
 from updater.nos_updater import NOSUpdater
 from updater.in_network_updater import INUpdater
+from updater.rules_updater import RulesUpdater
 from updater.tif_updater import TIFUpdater
 
 INTERACTIVE = False
@@ -674,7 +675,15 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
                                 accessRules=til_msg_pb2.AccessRules(
                                     vnis = self.codeValidator.til["accessRules"]["VNI"] if isinstance(self.codeValidator.til["accessRules"]["VNI"], list) else [self.codeValidator.til["accessRules"]["VNI"]]
                                 ),
-                                updateAction = orchestrator_msg_pb2.UPDATE_ACTION_CREATE
+                                updateAction = orchestrator_msg_pb2.UPDATE_ACTION_CREATE,
+                                runtimeRules=[
+                                    til_msg_pb2.RuntimeRule(
+                                        table=rule["table"],
+                                        actionName=rule["actionName"],
+                                        matches=[rule["match"]],
+                                        actionParams=[rule["actionParams"]]
+                                    ) for rule in self.codeValidator.til["runtimeRules"]
+                                ]
                             )
                         )
                     )
@@ -761,7 +770,15 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
                                 accessRules=til_msg_pb2.AccessRules(
                                     vnis = self.codeValidator.til["accessRules"]["VNI"] if isinstance(self.codeValidator.til["accessRules"]["VNI"], list) else [self.codeValidator.til["accessRules"]["VNI"]]
                                 ),
-                                updateAction = orchestrator_msg_pb2.UPDATE_ACTION_UPDATE
+                                updateAction = orchestrator_msg_pb2.UPDATE_ACTION_UPDATE,
+                                runtimeRules=[
+                                    til_msg_pb2.RuntimeRule(
+                                        table=rule["table"],
+                                        actionName=rule["actionName"],
+                                        matches=[rule["match"]],
+                                        actionParams=[rule["actionParams"]]
+                                    ) for rule in self.codeValidator.til["runtimeRules"]
+                                ]
                             )
                         )
                     )
@@ -860,11 +877,19 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
                                         tenantFuncName=tenantFuncName
                                     ),
                                     acceleratorType = acceleratorType,
-                                    updateAction= orchestrator_msg_pb2.UPDATE_ACTION_DELETE
+                                    updateAction= orchestrator_msg_pb2.UPDATE_ACTION_DELETE,
+                                    runtimeRules=[
+                                        til_msg_pb2.RuntimeRule(
+                                            table=rule["table"],
+                                            actionName=rule["actionName"],
+                                            matches=[rule["match"]],
+                                            actionParams=[rule["actionParams"]]
+                                        ) for rule in self.tenants[tenantId][tenantFuncName]["TDC"]["TIL"]["runtimeRules"]
+                                    ]
                                 )
                             )
+                            )
                         )
-                    )
                     if resp.status == 200:
                         self.logger.info("Added/Changed Deployment.")
                         self.logger.debug("Debug Information: (status code: 200, message: {})".format(resp.message))
@@ -1069,6 +1094,10 @@ if __name__ == "__main__":
         tcc = TenantCommunicationController(address=TCC_ADDRESS)
         tcc.run()
         logger.info("TCC started.")
+        logger.info("Starting RulesUpdater...")
+        rulesUpdater = RulesUpdater()
+        rulesUpdater.run()
+        logger.info("RulesUpdater started.")
         logger.info("Starting Management Process")
         orchestrator = Orchestrator()
         orchestrator.experiment_protocol = experiment_protocol

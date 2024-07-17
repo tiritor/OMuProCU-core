@@ -30,11 +30,13 @@ typedef bit<FLOW_MONITORING_TIMESTAMP_WIDTH> time_t;
 typedef bit<64> time_t_extended;
 
 const ether_type_t ETHERTYPE_IPV4 = 0x0800;
+const ether_type_t ETHERTYPE_ARP = 0x0806;
 const ether_type_t ETHERTYPE_FLOW_MONITORING = 0x4242;
 const ether_type_t ETHERTYPE_FLOW_EXPORT_REQUEST = 0x2121;
 const ether_type_t ETHERTYPE_FLOW_EXPORT_RESPONSE = 0x1212;
 enum bit<16> ether_types_t {
     IPV4                 = ETHERTYPE_IPV4,
+    ARP                  = ETHERTYPE_ARP,
     FLOW_MONITORING      = ETHERTYPE_FLOW_MONITORING,
     FLOW_EXPORT_REQUEST  = ETHERTYPE_FLOW_EXPORT_REQUEST,
     FLOW_EXPORT_RESPONSE = ETHERTYPE_FLOW_EXPORT_RESPONSE
@@ -54,6 +56,18 @@ header ethernet_h {
     ether_type_t  ether_type;
 }
 const bit<16> ETHERNET_H_LENGTH = 14;
+
+header arp_h {
+    bit<16> hrd; // Hardware Type
+    bit<16> pro; // Protocol Type
+    bit<8> hln; // Hardware Address Length
+    bit<8> pln; // Protocol Address Length
+    bit<16> op;  // Opcode
+    mac_address_t srcHwAddr; // Sender Hardware Address
+    ipv4_address_t srcIpAddr; // Sender Protocol Address
+    mac_address_t targetHwAddr; // Target Hardware Address
+    ipv4_address_t targetIpAddr; // Target Protocol Address
+}
 
 header ipv4_h {
     bit<4>          version;
@@ -78,6 +92,13 @@ header icmp_h {
     bit<8>  type;
     bit<8>  code;
     bit<16> checksum;
+    bit<16> identifier;
+    bit<16> sequence_number;
+    bit<128> timestamp;
+}
+
+header icmp_options_h {
+    bit<320> options;
 }
 
 header tcp_h {
@@ -261,18 +282,22 @@ struct metadata_t {
 
 struct headers_t {
     ethernet_h     ethernet;
+    arp_h          arp;
     ipv4_h         ipv4;
     ipv4_options_h ipv4_options;
     icmp_h         icmp;
+    icmp_options_h icmp_options;
     tcp_h          tcp;
     tcp_options_h  tcp_options;
     udp_h          udp;
     pm_h           pm;
     vxlan_h        vxlan;
     ethernet_h     inner_ethernet;
+    arp_h          inner_arp;
     ipv4_h         inner_ipv4;
     ipv4_options_h inner_ipv4_options;
     icmp_h         inner_icmp;
+    icmp_options_h inner_icmp_options;
     tcp_h          inner_tcp;
     tcp_options_h  inner_tcp_options;
     udp_h          inner_udp;

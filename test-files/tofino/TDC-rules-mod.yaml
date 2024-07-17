@@ -43,14 +43,14 @@ TIL: # Tenant Isolation Logic
         ip_proto: 7
         action: "drop"
       # presetRules: {} # List of pre-defined rules
-      # additionalRules: {} # List of additional rules (added by runtime) 
-  runtimeRules: # Rules for tables which are deployed in the tenant in-network code 
+      # additionalRules: {} # List of additional rules (added by runtime) # TODO: is this needed?
+  runtimeRules: # Rules for tables which are deployed in the tenant in-network code # TODO: This must be checked by the validator!
     - mode: 'table_add'
       table: 'TestIngress.test_table' # table name with start point in its p4 code!
-      actionName: 'CheckFeature' # action name with start point in its p4 code!
+      actionName: 'NoAction' # action name with start point in its p4 code!
       match: "{'meta.feature_meta.node_id': 0, 'meta.feature_meta.prevFeature': 0, 'meta.feature_meta.isTrue': 1}" # match with start point in its p4 code! # TODO: Metadata possible for multiple tenants?
-      actionParams: "{'node_id': 1, 'f_inout': 1, 'threshold': 64}" # action params with start point in its p4 code!
-INC: # in-network code of tenant 
+      actionParams: "{'node_id': 3, 'f_inout': 4, 'threshold': 64}" # action params with start point in its p4 code!
+INC: # in-network code of tenant # TODO: This is kept simple for now as only the "static" P4 Code should changed!
   p4Code: |
     /*************************************************************************
     ************************* C O N T R O L **********************************

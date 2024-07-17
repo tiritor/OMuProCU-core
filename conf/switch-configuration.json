@@ -5,6 +5,7 @@
   },
   "ipv4_host_entries": [],
   "arp_table_host_entries": [],
+  "tenant_rules": {},
   "initialized_ports": [
     {
       "port": 18,

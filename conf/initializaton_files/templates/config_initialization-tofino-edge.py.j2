@@ -7,7 +7,7 @@ lag_ecmp_sel = p4.TenantINCFrameworkIngress.lag_ecmp_sel
 mbr_base = {{ lag_md.memberbase }}
 memb_port_ids = []
 memb_port_active = []
-{% for port in lag_md.dp_ports %}
+{% for port in lag_md.dpPorts %}
 port_{{ loop.index }} = mbr_base + {{ loop.index }}
 lag_ecmp.entry_with_send(port_{{ loop.index }}, port={{ port["portId"] }}).push()
 memb_port_ids.append(port_{{ loop.index }})

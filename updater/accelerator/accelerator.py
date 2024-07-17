@@ -149,7 +149,7 @@ class Tofino(Accelerator):
     defines = [
     ]
     switches = []
-    otf_apply_parameter = "hdr, meta, ig_intr_md"
+    otf_apply_parameter = "hdr, meta, ig_intr_md, ig_tm_md"
 
     def __init__(self, path="inc_template/" + ACCELERATOR_CONFIGURATION["tofino"]["template"].value, out_path=None, dev_init_mode=ACCELERATOR_CONFIGURATION["tofino"]["dev_init_mode"]) -> None:
         super().__init__(path, dev_init_mode)
