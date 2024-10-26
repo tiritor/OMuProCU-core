@@ -1,7 +1,6 @@
 
 
 import base64
-from enum import Enum
 import hashlib
 import json
 import subprocess

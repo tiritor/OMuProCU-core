@@ -157,6 +157,12 @@ header analyzer_h {
 }
 const bit<16> ANALYZER_DATA_H_LENGTH = 14;
 
+header udp_application_h {
+    bit<16> type;
+    bit<16> session_id;
+}
+const bit<16> UDP_APPLICATION_H_LENGTH = 4;
+
 header flow_record_data_h {
     // general properties
     bit<8>           export_condition;
@@ -301,6 +307,7 @@ struct headers_t {
     tcp_h          inner_tcp;
     tcp_options_h  inner_tcp_options;
     udp_h          inner_udp;
+    udp_application_h udp_application;
     flow_monitoring_h flow_mon;
     tenant_h        tenant;
     flow_export_request_h  flow_export_request;

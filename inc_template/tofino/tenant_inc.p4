@@ -92,7 +92,7 @@ control TenantINCFrameworkIngress(inout headers_t hdr,
         test.apply();
         /* TTL Modifications */
         if (hdr.ipv4.isValid()) {
-            decrement(hdr.ipv4.ttl, ttl_dec);
+            decrement(hdr.ipv4.ttl, 1);
         } // else if (hdr.ipv6.isValid()) {
           //  decrement(hdr.ipv6.hop_limit, ttl_dec);
         // }

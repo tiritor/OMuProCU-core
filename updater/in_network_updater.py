@@ -2,7 +2,6 @@
 
 from concurrent import futures
 import hashlib
-import json
 from multiprocessing import Process
 import os
 import random
@@ -19,9 +18,9 @@ from orchestrator_utils.til import orchestrator_msg_pb2_grpc, til_msg_pb2_grpc
 from orchestrator_utils.til import time_measurement_pb2
 from orchestrator_utils.til.orchestrator_msg_pb2 import UPDATE_ACTION_CREATE, UPDATE_ACTION_UPDATE, UPDATE_ACTION_DELETE, UPDATE_STATUS_UNSPECIFIED, UPDATE_STATUS_WAIT_FOR_UPDATE, UPDATE_STATUS_UPDATING, UPDATE_STATUS_UPDATED_SUCCESS, UPDATE_STATUS_UPDATED_FAILURE, UPDATE_STATUS_DELETED_SUCCESS, UPDATE_STATUS_DELETED_FAILURE, ACCELERATOR_TYPE_UNSPECIFIED, INUpdateResponse, INUpdateRequest
 from orchestrator_utils.til.orchestrator_msg_pb2_grpc import INUpdaterCommunicatorServicer
-from orchestrator_utils.til.til_msg_pb2 import TenantMetadata, TenantFuncDescription
+from orchestrator_utils.til.til_msg_pb2 import TenantConfig, TenantConfigRequest, TenantMetadata, TenantFuncDescription
 
-from conf.grpc_settings import INUPDATER_ADDRESS, RULESUPDATER_ADDRESS, TIF_ADDRESS, maxMsgLength
+from conf.grpc_settings import INUPDATER_ADDRESS, RULESUPDATER_ADDRESS, TCC_ADDRESS, TIF_ADDRESS, maxMsgLength
 from conf.in_updater_settings import ACCELERATOR_CONFIGURATION, DevInitModes
 from conf.time_measurement_settings import CURRENT_TIMEMEASUREMENT_TIMESCALE
 from updater.accelerator.accelerator import Accelerator, AcceleratorCompilerException, BMv2, acceleratorClasses
@@ -70,6 +69,11 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
         self.old_tenant_cnf_accelerator_map = {}
         self.rules_to_apply = {}
         self.rules_to_delete = {}
+        self.tenant_functions_description = {
+            "CREATE" : [],
+            "UPDATE" : [],
+            "DELETE" : []
+        }
         for accelerator in AcceleratorType:
             if accelerator == AcceleratorType.NONE:
                 continue
@@ -204,6 +208,65 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
         self.grpc_server.stop(10)
         self.logger.info("INUpdater stopped")
 
+    def _update_til_in_tcc(self):
+        """
+        Helper method to update the TIL in the TCC
+        """
+        with grpc.insecure_channel(TCC_ADDRESS) as channel:
+            tcc_updater_stub = til_msg_pb2_grpc.TCCommunicatorStub(channel)
+            for tenant in self.tenant_functions_description["CREATE"]:
+                resp : til_msg_pb2.TenantConfigResponse = tcc_updater_stub.CreateTenantConfig(
+                    TenantConfigRequest(
+                        tenantMetadata = TenantMetadata(
+                            tenantId = tenant.tenantMetadata.tenantId,
+                            tenantFuncName = tenant.tenantMetadata.tenantFuncName
+                        ),
+                        tConfig=TenantConfig(
+                            tenantMetadata=tenant.tenantMetadata,
+                            tFunctionDescription=tenant,
+                        )
+                    )
+                )
+                if resp.status == 200:
+                    self.tenant_functions_description["CREATE"] = []
+                else:
+                    raise UpdateException("Error while applying Tenant Func Descriptions to TCC: {} (Code: {})".format(resp.message, resp.status))
+            for tenant in self.tenant_functions_description["UPDATE"]:
+                resp : til_msg_pb2.TenantConfigResponse = tcc_updater_stub.UpdateTenantConfig(
+                    TenantConfigRequest(
+                        tenantMetadata = TenantMetadata(
+                            tenantId = tenant.tenantMetadata.tenantId,
+                            tenantFuncName = tenant.tenantMetadata.tenantFuncName
+                        ),
+                        tConfig=TenantConfig(
+                            tenantMetadata=tenant.tenantMetadata,
+                            tFunctionDescription=tenant,
+                        )
+                    )
+                )
+                if resp.status == 200:
+                    self.tenant_functions_description["UPDATE"] = []
+                else:
+                    raise UpdateException("Error while applying Tenant Func Descriptions to TCC: {} (Code: {})".format(resp.message, resp.status))
+            for tenant in self.tenant_functions_description["DELETE"]:
+                resp : til_msg_pb2.TenantConfigResponse = tcc_updater_stub.DeleteTenantConfig(
+                    TenantConfigRequest(
+                        tenantMetadata = TenantMetadata(
+                            tenantId = tenant.tenantMetadata.tenantId,
+                            tenantFuncName = tenant.tenantMetadata.tenantFuncName
+                        ),
+                        tConfig=TenantConfig(
+                            tenantMetadata=tenant.tenantMetadata,
+                            tFunctionDescription=tenant,
+                        )
+
+                    )
+                )
+                if resp.status == 200:
+                    self.tenant_functions_description["DELETE"] = []
+                else:
+                    raise UpdateException("Error while applying Tenant Func Descriptions to TCC: {} (Code: {})".format(resp.message, resp.status))
+
     def _update_code(self, accelerator_name, force = False):
         """
         Helper method to trigger the TIF code updates. 
@@ -226,8 +289,7 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
             with grpc.insecure_channel(TIF_ADDRESS, options=[
         ('grpc.max_send_message_length', maxMsgLength),
         ('grpc.max_receive_message_length', maxMsgLength),
-        ('grpc.max_message_length', maxMsgLength)
-    ]) as channel:
+        ('grpc.max_message_length', maxMsgLength)]) as channel:
                 inc_updater_stub = orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorStub(channel)
                 resp : orchestrator_msg_pb2.TIFResponse = inc_updater_stub.GetTIFCode(
                     orchestrator_msg_pb2.TIFRequest(
@@ -248,15 +310,8 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
             hashes = self.accelerator_compilers[accelerator_name].generate_hashes(code_parts)
             if force or \
                not self.accelerator_compilers[accelerator_name].compare_hashes(hashes):
-
-                # TODO: Apply Tenant Func Descriptions to Tenant Communication Controller.
-                # Apply to accelerator 
-                tenant_funcs_metadata = [TenantFuncDescription(
-                    tenantMetadata=TenantMetadata(
-                        tenantId=tenant["tenantId"], 
-                        tenantFuncName=tenant["tenantFuncName"]), 
-                    tenantFuncId=tenant["tenant_func_id_num"]) 
-                    for key, tenant in self.tenants_code_definitions[accelerator_name].items() if key != "general"]
+                # Update TIL in TCC first before applying the new code
+                self._update_til_in_tcc()
                 # The rules of the tenant functions that will be deleted must be deleted first!
                 for tenant_cnf_id, runtime_rules in self.rules_to_delete.items():
                     self._delete_rules(tenant_cnf_id, runtime_rules)
@@ -354,11 +409,46 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
             if inTConfig.updateAction == UPDATE_ACTION_CREATE:
                 self.otf_generators[acceleratorType.value].add_otf_by_code(tenant_cnf_id, self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["tenant_func_id_num"], accessRules, mainIngressName, p4Code)
                 self.rules_to_apply[tenant_cnf_id] = [MessageToDict(rule) for rule in inTConfig.runtimeRules]
+                with grpc.insecure_channel(TCC_ADDRESS) as channel:
+                    tcc_updater_stub = til_msg_pb2_grpc.TCCommunicatorStub(channel)
+                    resp : til_msg_pb2.TenantConfigResponse = tcc_updater_stub.GetTenantConfig(
+                        TenantConfigRequest(
+                            tenantMetadata = TenantMetadata(
+                                tenantId = tenantId,
+                                tenantFuncName = tenantFuncName
+                            )
+                        )
+                    )
+                    if resp.status == 200:
+                        self.tenant_functions_description["UPDATE"].append(TenantFuncDescription(
+                            tenantMetadata=til_msg_pb2.TenantMetadata(
+                                tenantId=tenantId,
+                                tenantFuncName=tenantFuncName
+                            ),
+                            tenantFuncId=self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["tenant_func_id_num"])
+                        )
+                    elif resp.status == 404:
+                        self.tenant_functions_description["CREATE"].append(TenantFuncDescription(
+                            tenantMetadata=til_msg_pb2.TenantMetadata(
+                                tenantId=tenantId,
+                                tenantFuncName=tenantFuncName
+                            ),
+                            tenantFuncId=self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["tenant_func_id_num"]) 
+                        )
+                    else:
+                        raise UpdateException("Error while checking if tenant function exists: {} (Code: {})".format(resp.message, resp.status))
             elif inTConfig.updateAction == UPDATE_ACTION_UPDATE:
                 try: 
                     self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["status"] = UPDATE_STATUS_UPDATING
                     self.otf_generators[acceleratorType.value].update_otf_by_code(tenant_cnf_id, self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["tenant_func_id_num"], accessRules, mainIngressName, p4Code)
                     self.rules_to_apply[tenant_cnf_id] = [MessageToDict(rule) for rule in inTConfig.runtimeRules]
+                    self.tenant_functions_description["UPDATE"].append(TenantFuncDescription(
+                        tenantMetadata=til_msg_pb2.TenantMetadata(
+                            tenantId=tenantId,
+                            tenantFuncName=tenantFuncName
+                        ),
+                        tenantFuncId=self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["tenant_func_id_num"])
+                    )
                 except KeyError as err:
                     self.logger.warning("Tenant CNF ID not found! Creating OTF part.")
                     self.otf_generators[acceleratorType.value].add_otf_by_code(tenant_cnf_id, self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["tenant_func_id_num"], accessRules, mainIngressName, p4Code)
@@ -367,6 +457,26 @@ class INUpdater(Process, Updater, Persistor, INUpdaterCommunicatorServicer):
                 # Keep the mapping for the status access.
                 self.old_tenant_cnf_accelerator_map[tenant_cnf_id] = self.tenant_cnf_accelerator_map.pop(tenant_cnf_id)
                 self.rules_to_delete[tenant_cnf_id] = [MessageToDict(rule) for rule in inTConfig.runtimeRules]
+                with grpc.insecure_channel(TCC_ADDRESS) as channel:
+                    tcc_updater_stub = til_msg_pb2_grpc.TCCommunicatorStub(channel)
+                    resp : til_msg_pb2.TenantConfigResponse = tcc_updater_stub.GetTenantConfig(
+                        TenantConfigRequest(
+                            tenantMetadata = TenantMetadata(
+                                tenantId = tenantId,
+                                tenantFuncName = tenantFuncName
+                            )
+                        )
+                    )
+                if resp.status == 200:
+                    self.tenant_functions_description["DELETE"].append(TenantFuncDescription(
+                        tenantMetadata=til_msg_pb2.TenantMetadata(
+                            tenantId=tenantId,
+                            tenantFuncName=tenantFuncName
+                        ),
+                        tenantFuncId=self.tenants_code_definitions[acceleratorType.value][tenant_cnf_id]["tenant_func_id_num"])
+                    )
+                elif resp.status == 404:
+                    self.logger.debug(f"Tenant function {tenant_cnf_id} not found in TCC. No need to delete.")
             else:
                 raise UpdateException("Update Action was unspecified or not recognized!") 
         for name, otf_generator in self.otf_generators.items():

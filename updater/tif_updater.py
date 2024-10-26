@@ -1,15 +1,12 @@
 
 import ast
 from concurrent import futures
-from distutils.command import build
 import ipaddress
 import json
 from multiprocessing import Process
 import os
 from pathlib import Path
-from re import T
 import re
-import shlex
 import subprocess
 import tempfile
 from typing import Union
@@ -427,8 +424,8 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
                         )
             if request.nexthopMapEntries:
                 for entry in request.nexthopMapEntries:
-                    if entry.key not in self.switch_configuration["ipv4_host_entries"]:
-                        self.switch_configuration["ipv4_host_entries"][entry.key] = entry.nextHopId
+                    if entry.key not in self.switch_configuration["nexthop_map"].keys():
+                        self.switch_configuration["nexthop_map"][entry.key] = entry.nextHopId
                         if self.applied_table_entries.get("nexthop_map") is not None:
                             if entry.key not in self.applied_table_entries["nexthop_map"]:
                                 tables["nexthop"].append((f'"{entry.key}"', entry.nextHopId))
@@ -722,7 +719,8 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
                                 rule["matches"][key_name] = "'{}'".format(key)
                             elif is_valid_ipv4(str(key)):
                                 rule["matches"][key_name] = "'{}'".format(key)
-                    rule["actionParams"] = ast.literal_eval(rule["actionParams"][0])
+                    if isinstance(rule["actionParams"], list):
+                        rule["actionParams"] = ast.literal_eval(rule["actionParams"][0])
                     if len(rule["actionParams"]) != 0:
                         for key_name, key in rule["actionParams"].items():
                             if is_valid_mac(str(key)):
@@ -741,7 +739,7 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
                             if len(self.switch_configuration["tenant_rules"][tenant_cnf_id]) == 0:
                                 del self.switch_configuration["tenant_rules"][tenant_cnf_id]
                             if self.applied_table_entries.get("tenant_rules") is not None:
-                                if rule in self.applied_table_entries["tenant_rules"]:
+                                if rule in self.applied_table_entries["tenant_rules"][tenant_cnf_id]:
                                     index = self.applied_table_entries["tenant_rules"][tenant_cnf_id].index(rule)
                                     if index != -1:
                                         tables["tenant_rules"].append(rule)
@@ -796,6 +794,14 @@ class TIFUpdater(Process, orchestrator_msg_pb2_grpc.TIFUpdateCommunicatorService
                                 tables["nexthop"].append(entry.key)
             bfrt_python_code = self._build_table_entry_bfrt_python_code("delete", tables)
             self._run_bfshell_bfrt_python(bfrt_python_code)
+            # Remove the deleted table entries from the applied table entries list.
+            for table in self.applied_table_entries.keys():
+                if table in tables.keys():
+                    if table == "tenant_rules":
+                        for rule in tables[table]:
+                            self.applied_table_entries[table][self._build_tenant_cnf_id(request.tenantMetadata.tenantId, request.tenantMetadata.tenantFuncName)].remove(rule)
+                    else:
+                        self.applied_table_entries[table].remove(tables[table])
             self.save_switch_configuration()
         except Exception as ex:
             self.logger.exception(ex)

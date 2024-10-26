@@ -177,12 +177,14 @@ control TenantINCFrameworkIngressDeparser(packet_out packet,
         packet.emit(hdr.tcp_options);
         packet.emit(hdr.udp);
         packet.emit(hdr.vxlan);
+        packet.emit(hdr.inner_arp);
         packet.emit(hdr.inner_ethernet);
         packet.emit(hdr.inner_ipv4);
         packet.emit(hdr.inner_icmp);
         packet.emit(hdr.inner_tcp);
         packet.emit(hdr.inner_tcp_options);
         packet.emit(hdr.inner_udp);
+        // packet.emit(hdr.udp_application);
     }
 }
 

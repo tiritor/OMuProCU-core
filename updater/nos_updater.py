@@ -104,6 +104,28 @@ class NOSUpdater(Process, Updater, Persistor, NOSUpdaterCommunicatorServicer):
                 with self.tenants_defintions_lock:
                     self.tenants_definitions[tenant_cnf_id]["status"] = UPDATE_STATUS_UPDATING
             if request.updateAction == orchestrator_msg_pb2.UPDATE_ACTION_UPDATE or request.updateAction == UPDATE_ACTION_CREATE:
+                if request.updateAction == orchestrator_msg_pb2.UPDATE_ACTION_CREATE:
+                    resp : til_msg_pb2.TenantConfigResponse = self.tc_stub.CreateTenantConfig(til_msg_pb2.TenantConfigRequest(
+                        tenantMetadata=til_msg_pb2.TenantMetadata(tenantId=tenantId, tenantFuncName=tenantFuncName),
+                        tConfig=request.tConfig
+                    ))
+                    self.tc_resp = resp
+                elif request.updateAction == orchestrator_msg_pb2.UPDATE_ACTION_UPDATE:
+                    resp : til_msg_pb2.TenantConfigResponse = self.tc_stub.UpdateTenantConfig(til_msg_pb2.TenantConfigRequest(
+                        tenantMetadata=til_msg_pb2.TenantMetadata(tenantId=tenantId, tenantFuncName=tenantFuncName),
+                        tConfig=request.tConfig
+                    ))
+                    self.tc_resp = resp
+                if resp.status == 200: 
+                    message = "Updated Tenant Config"
+                else:
+                    message = "Error while updating Tenant Config: {}".format(resp.message)
+                    self.logger.error(message)
+                    return NOSUpdateResponse(
+                        status = resp.status,
+                        message = message,
+                        updateStatus = UPDATE_STATUS_UPDATED_FAILURE
+                    )
                 updated, stdout, stderr, deployment = self.update(tenantId, tenantFuncName, request.tConfig, yaml.safe_load(request.tConfig.deployment))
                 updateStatus = UPDATE_STATUS_UPDATED_SUCCESS
                 if updated:
@@ -243,17 +265,17 @@ class NOSUpdater(Process, Updater, Persistor, NOSUpdaterCommunicatorServicer):
         deployment = self.backend_obj._add_tenantMetadata_to_deployment(tenantFuncName, tenantId, deployment)
         deployment = self.backend_obj._add_annotations_to_deployment(deployment)
             
-        tc_resp: til_msg_pb2.TenantConfigResponse = self.tc_stub.UpdateTenantConfig(til_msg_pb2.TenantConfigRequest(
-            tenantMetadata=til_msg_pb2.TenantMetadata(tenantId=tenantId, tenantFuncName=tenantFuncName),
-            tConfig=til
-            )
-        )
+        # tc_resp: til_msg_pb2.TenantConfigResponse = self.tc_stub.UpdateTenantConfig(til_msg_pb2.TenantConfigRequest(
+        #     tenantMetadata=til_msg_pb2.TenantMetadata(tenantId=tenantId, tenantFuncName=tenantFuncName),
+        #     tConfig=til
+        #     )
+        # )
         cnf_changed, stdout, stderr = self.backend_obj.apply(tenantId, deployment)
-        updateStatus = UPDATE_STATUS_UPDATED_SUCCESS if tc_resp.status == 200 and stderr == "" else UPDATE_STATUS_UPDATED_FAILURE
+        updateStatus = UPDATE_STATUS_UPDATED_SUCCESS if self.tc_resp.status == 200 and stderr == "" else UPDATE_STATUS_UPDATED_FAILURE
+        changed = self.tc_resp.status == 200 or cnf_changed
         with self.tenants_defintions_lock:
             self.tenants_definitions.update({self._build_tenant_cnf_id(tenantId, tenantFuncName) : {"deployment": deployment, "status": updateStatus}})
             self.store_to_persistence(self.tenants_definitions)
-        changed = tc_resp.status == 200 or cnf_changed
         return changed, stdout, stderr, deployment
 
     def Cleanup(self, request, context):

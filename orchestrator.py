@@ -1,7 +1,6 @@
 
 
 from concurrent import futures
-from enum import Enum
 import logging
 import os
 import signal
@@ -548,13 +547,15 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
                         tenant_security_config = None
                         with open("conf/tenant_security_config.json", "r") as f:
                             tenant_security_config = json.load(f)
+                        new_tenant_security_config = tenant_security_config.copy()
                         if self.tenants and tenantId in self.tenants.keys():
                             if self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"] in tenant_security_config[str(tenantId)]["devices"]["default"]["mainIngressNames"]:
-                                tenant_security_config[str(tenantId)]["devices"]["default"]["mainIngressNames"].remove(self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"])
-                        with open("conf/tenant_security_config.json", "w") as f:
-                            f.write("")
-                            json.dump(tenant_security_config, f, indent=2)
-                        ### Rollback to old deployment if available, depending also used accelerator and its TIF besides the NOS deployment.
+                                new_tenant_security_config[str(tenantId)]["devices"]["default"]["mainIngressNames"].remove(self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"])
+                        if new_tenant_security_config != tenant_security_config:
+                            with open("conf/tenant_security_config.json", "w") as f:
+                                f.write("")
+                                json.dump(tenant_security_config, f, indent=2)
+                            ### Rollback to old deployment if available, depending also used accelerator and its TIF besides the NOS deployment.
                     elif self.tenants_status[tenantId][tenantFuncName] == DeploymentStatus.REQUEST_DELETE:
                         resp = self._check_scheduler_update(tenantId, tenantFuncName)
                         if resp.status == 200: 
@@ -568,13 +569,15 @@ class Orchestrator(til_msg_pb2_grpc.DeploymentCommunicatorServicer, Persistor):
                         tenant_security_config = None
                         with open("conf/tenant_security_config.json", "r") as f:
                             tenant_security_config = json.load(f)
+                        new_tenant_security_config = tenant_security_config.copy()
                         if self.tenants and tenantId in self.tenants.keys():
                             if self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"] in tenant_security_config[str(tenantId)]["devices"]["default"]["mainIngressNames"]:
-                                tenant_security_config[str(tenantId)]["devices"]["default"]["mainIngressNames"].remove(self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"])
-                        with open("conf/tenant_security_config.json", "w") as f:
-                            f.write("")
-                            json.dump(tenant_security_config, f, indent=2)
-                        ### Here can be introduce a Garbage Collection System to clean up very old deleted TDCs.
+                                new_tenant_security_config[str(tenantId)]["devices"]["default"]["mainIngressNames"].remove(self.tenants[tenantId][tenantFuncName]["TDC"]["INC"]["mainIngressName"])
+                        if new_tenant_security_config != tenant_security_config:
+                            with open("conf/tenant_security_config.json", "w") as f:
+                                f.write("")
+                                json.dump(new_tenant_security_config, f, indent=2)
+                            ### Here can be introduce a Garbage Collection System to clean up very old deleted TDCs.
             self.logger.info(self.tenants_status)
             time.sleep(5)
 

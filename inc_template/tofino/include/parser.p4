@@ -162,7 +162,14 @@ parser TenantINCFrameworkIngressParser(packet_in packet,
         packet.extract(hdr.inner_udp);
         meta.l4_meta.src_port = hdr.inner_udp.src_port;
         meta.l4_meta.dst_port = hdr.inner_udp.dst_port;
+        transition select(hdr.inner_udp.dst_port) {
+            8080: parse_udp_application;
+            default: accept;
+        }
+    }
 
+    state parse_udp_application {
+        packet.extract(hdr.udp_application);
         transition accept;
     }
 
@@ -228,6 +235,7 @@ control TenantINCFrameworkIngressDeparser(packet_out packet,
         packet.emit(hdr.inner_tcp);
         packet.emit(hdr.inner_tcp_options);
         packet.emit(hdr.inner_udp);
+        packet.emit(hdr.udp_application);
     }
 }
 
